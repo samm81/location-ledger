@@ -92,6 +92,297 @@ def test_raw_phone_timestamp_converts_to_coordinate_date(tmp_path: Path) -> None
     )
 
 
+def test_loads_manual_overrides_from_inputs_directory(tmp_path: Path) -> None:
+    override_directory = tmp_path / "inputs" / "overrides"
+    override_directory.mkdir(parents=True)
+    (override_directory / "place-mappings.csv").write_text(
+        "\ufeffFrom city,From country,To city,To country\n"
+        "Midtown,United States,Manhattan,United States\n"
+        "Manhattan,United States,New York City,United States\n",
+        encoding="utf-8",
+    )
+    (override_directory / "trip-overrides.csv").write_text(
+        "Arrival date,Departure date,City,Country\n"
+        "2026-04-30,2026-05-22,Tianjin,China\n",
+        encoding="utf-8",
+    )
+
+    mappings, overrides = timeline_cities.load_override_data(tmp_path)
+
+    assert mappings == {
+        ("Midtown", "United States"): ("New York City", "United States"),
+        ("Manhattan", "United States"): ("New York City", "United States"),
+    }
+    assert overrides == [
+        timeline_cities.TripOverride(
+            date(2026, 4, 30),
+            date(2026, 5, 22),
+            "Tianjin",
+            "China",
+        )
+    ]
+
+
+def test_loads_blank_city_delete_override(tmp_path: Path) -> None:
+    path = tmp_path / "trip-overrides.csv"
+    path.write_text(
+        "Arrival date,Departure date,City,Country\n2026-05-15,2026-05-15,,\n",
+        encoding="utf-8",
+    )
+
+    overrides = timeline_cities.load_trip_overrides(path)
+
+    assert overrides[0].is_delete
+
+
+def test_loads_copied_output_row_with_duration_column(tmp_path: Path) -> None:
+    path = tmp_path / "trip-overrides.csv"
+    path.write_text(
+        "Arrival date,Departure date,City,Country\n"
+        "2025-08-12,2025-09-09,28,Ubud,Indonesia\n",
+        encoding="utf-8",
+    )
+
+    overrides = timeline_cities.load_trip_overrides(path)
+
+    assert overrides == [
+        timeline_cities.TripOverride(
+            date(2025, 8, 12), date(2025, 9, 9), "Ubud", "Indonesia"
+        )
+    ]
+
+
+def test_rejects_cross_country_place_mapping(tmp_path: Path) -> None:
+    path = tmp_path / "place-mappings.csv"
+    path.write_text(
+        "From city,From country,To city,To country\n"
+        "Manhattan,United States,Beijing,China\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="changes country"):
+        timeline_cities.load_place_mappings(path)
+
+
+def test_rejects_place_mapping_cycle(tmp_path: Path) -> None:
+    path = tmp_path / "place-mappings.csv"
+    path.write_text(
+        "From city,From country,To city,To country\nA,H,B,H\nB,H,A,H\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        timeline_cities.load_place_mappings(path)
+
+
+def test_rejects_overlapping_trip_override_ranges(tmp_path: Path) -> None:
+    path = tmp_path / "trip-overrides.csv"
+    path.write_text(
+        "Arrival date,Departure date,City,Country\n"
+        "2026-01-01,2026-01-10,A,H\n"
+        "2026-01-09,2026-01-12,B,H\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="overlapping"):
+        timeline_cities.load_trip_overrides(path)
+
+
+def test_shared_transition_dates_are_allowed_for_trip_overrides(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "trip-overrides.csv"
+    path.write_text(
+        "Arrival date,Departure date,City,Country\n"
+        "2026-01-01,2026-01-10,A,H\n"
+        "2026-01-10,2026-01-12,B,H\n",
+        encoding="utf-8",
+    )
+
+    overrides = timeline_cities.load_trip_overrides(path)
+
+    assert len(overrides) == 2
+
+
+def test_trip_override_collapses_the_tianjin_example() -> None:
+    stays = [
+        timeline_cities.Stay(date(2026, 4, 30), date(2026, 5, 11), "Tianjin", "China"),
+        timeline_cities.Stay(date(2026, 5, 11), date(2026, 5, 15), "Nanyuki", "Kenya"),
+        timeline_cities.Stay(date(2026, 5, 15), date(2026, 5, 15), "Tianjin", "China"),
+        timeline_cities.Stay(date(2026, 5, 19), date(2026, 5, 22), "Tianjin", "China"),
+    ]
+    override = timeline_cities.TripOverride(
+        date(2026, 4, 30), date(2026, 5, 22), "Tianjin", "China"
+    )
+
+    fixed, audit = timeline_cities.apply_trip_overrides(stays, [override])
+
+    assert fixed == [
+        timeline_cities.Stay(date(2026, 4, 30), date(2026, 5, 22), "Tianjin", "China")
+    ]
+    assert [record.action for record in audit] == ["manual trip override"]
+
+
+def test_trip_override_splits_partial_stays() -> None:
+    stays = [
+        timeline_cities.Stay(date(2026, 1, 1), date(2026, 1, 10), "Before", "Country"),
+        timeline_cities.Stay(date(2026, 1, 10), date(2026, 1, 20), "After", "Country"),
+    ]
+    override = timeline_cities.TripOverride(
+        date(2026, 1, 5), date(2026, 1, 15), "Forced", "Country"
+    )
+
+    fixed, _audit = timeline_cities.apply_trip_overrides(stays, [override])
+
+    assert fixed == [
+        timeline_cities.Stay(date(2026, 1, 1), date(2026, 1, 5), "Before", "Country"),
+        timeline_cities.Stay(date(2026, 1, 5), date(2026, 1, 15), "Forced", "Country"),
+        timeline_cities.Stay(date(2026, 1, 15), date(2026, 1, 20), "After", "Country"),
+    ]
+
+
+def test_delete_override_removes_only_exact_zero_day_stay() -> None:
+    stays = [
+        timeline_cities.Stay(date(2026, 4, 30), date(2026, 5, 15), "Tianjin", "China"),
+        timeline_cities.Stay(date(2026, 5, 15), date(2026, 5, 15), "Nanyuki", "Kenya"),
+        timeline_cities.Stay(date(2026, 5, 15), date(2026, 5, 22), "Tianjin", "China"),
+    ]
+    override = timeline_cities.TripOverride(
+        date(2026, 5, 15), date(2026, 5, 15), "", ""
+    )
+
+    fixed, audit = timeline_cities.apply_trip_overrides(stays, [override])
+
+    assert fixed == [
+        timeline_cities.Stay(date(2026, 4, 30), date(2026, 5, 22), "Tianjin", "China")
+    ]
+    assert audit[0].action == "manual delete"
+
+
+def test_loads_gpx_track_points_as_utc_positions(tmp_path: Path) -> None:
+    gpx_directory = tmp_path / "gpx"
+    gpx_directory.mkdir()
+    (gpx_directory / "20260722.gpx").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="48.2227007" lon="16.3899034">
+      <ele>223.9</ele><time>2026-07-21T23:00:16.896Z</time>
+    </trkpt>
+    <trkpt lat="48.2226946" lon="16.3898979">
+      <time>2026-07-21T23:20:18.219Z</time>
+    </trkpt>
+  </trkseg></trk>
+</gpx>
+""",
+        encoding="utf-8",
+    )
+
+    positions = timeline_cities.load_gpx_positions(gpx_directory)
+
+    assert len(positions) == 2
+    assert positions[0].timestamp == datetime(
+        2026, 7, 21, 23, 0, 16, 896000, tzinfo=UTC
+    )
+    assert positions[0].latitude == 48.2227007
+    assert positions[0].longitude == 16.3899034
+    assert positions[0].source == "gpx:20260722.gpx"
+
+
+def test_gpx_directory_is_authoritative_and_google_augments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_path = tmp_path / "timeline.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "semanticSegments": [
+                    {
+                        "startTime": "2026-07-21T23:00:00Z",
+                        "endTime": "2026-07-22T01:00:00Z",
+                        "visit": {
+                            "topCandidate": {
+                                "placeLocation": {"latLng": "47.5°, 19.05°"}
+                            }
+                        },
+                    },
+                    {
+                        "startTime": "2026-07-23T00:00:00Z",
+                        "endTime": "2026-07-23T02:00:00Z",
+                        "visit": {
+                            "topCandidate": {
+                                "placeLocation": {"latLng": "47.5°, 19.05°"}
+                            }
+                        },
+                    },
+                ],
+                "rawSignals": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    gpx_directory = tmp_path / "gpx"
+    gpx_directory.mkdir()
+    (gpx_directory / "20260722.gpx").write_text(
+        """<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
+          <trkpt lat="48.2227007" lon="16.3899034">
+            <time>2026-07-21T23:00:00Z</time>
+          </trkpt>
+          <trkpt lat="48.2227007" lon="16.3899034">
+            <time>2026-07-22T00:00:00Z</time>
+          </trkpt>
+          <trkpt lat="48.2227007" lon="16.3899034">
+            <time>2026-07-22T01:00:00Z</time>
+          </trkpt>
+        </trkseg></trk></gpx>""",
+        encoding="utf-8",
+    )
+    budapest = _match(
+        "Budapest",
+        population=1_741_041,
+        distance_km=2.0,
+        rule="major_city",
+    )
+    vienna = _match(
+        "Vienna",
+        population=2_000_000,
+        distance_km=1.0,
+        rule="major_city",
+    )
+
+    def match_by_coordinate(
+        _self: CityNormalizer,
+        latitude: float,
+        _longitude: float,
+    ) -> CityMatch:
+        return vienna if latitude > 48 else budapest
+
+    monkeypatch.setattr(CityNormalizer, "match", match_by_coordinate)
+    output_prefix = tmp_path / "cities"
+
+    result = timeline_cities.run(
+        [
+            str(input_path),
+            "--gpx-directory",
+            str(gpx_directory),
+            "--output",
+            str(output_prefix),
+            "--timezone",
+            "Europe/Vienna",
+        ]
+    )
+
+    assert result == 0
+    rows = list(
+        csv.DictReader(
+            (tmp_path / "cities.raw.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    assert [row["City"] for row in rows] == ["Vienna", "Budapest"]
+
+
 def test_semantic_timestamp_uses_explicit_location_offset(tmp_path: Path) -> None:
     input_path = tmp_path / "semanticSegments.json"
     input_path.write_text(
@@ -443,7 +734,11 @@ def test_repair_replaces_only_isolated_one_day_stay(
     assert all(record.action == "kept" for record in disabled_audit)
 
 
-def test_run_end_to_end(tmp_path: Path) -> None:
+def test_run_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     input_path = tmp_path / "timeline.json"
     output_prefix = tmp_path / "cities.csv"
     raw_path = tmp_path / "cities.raw.csv"
@@ -483,6 +778,68 @@ def test_run_end_to_end(tmp_path: Path) -> None:
     assert row["City"] == "Budapest"
     assert audit_path.exists()
     assert fixed_path.exists()
+
+
+def test_run_auto_discovers_overrides_from_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "timeline.json"
+    output_prefix = tmp_path / "cities"
+    input_path.write_text(
+        json.dumps(
+            {
+                "semanticSegments": [],
+                "rawSignals": [
+                    {
+                        "position": {
+                            "LatLng": "47.5°, 19.05°",
+                            "timestamp": "2026-07-17T15:57:58.174Z",
+                        }
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    override_directory = tmp_path / "inputs" / "overrides"
+    override_directory.mkdir(parents=True)
+    (override_directory / "place-mappings.csv").write_text(
+        "From city,From country,To city,To country\n"
+        "Budapest,Hungary,Budapest Metro,Hungary\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = timeline_cities.run(
+        [
+            str(input_path),
+            "--output",
+            str(output_prefix),
+            "--timezone",
+            "Europe/Budapest",
+        ]
+    )
+
+    assert result == 0
+    raw_row = next(
+        csv.DictReader(
+            (tmp_path / "cities.raw.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    fixed_row = next(
+        csv.DictReader(
+            (tmp_path / "cities.fixed.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    audit_rows = list(
+        csv.DictReader(
+            (tmp_path / "cities.audit.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    assert raw_row["City"] == "Budapest"
+    assert fixed_row["City"] == "Budapest Metro"
+    assert audit_rows[-1]["Action"] == "manual mapping"
 
 
 def test_run_reports_export_without_positions(
@@ -527,6 +884,38 @@ def test_sample_weight_uses_interval_and_caps_long_gap() -> None:
     assert timeline_cities._sample_seconds(positions, 0, 10_800) == 1_800
     assert timeline_cities._sample_seconds(positions, 1, 10_800) == 60
     assert timeline_cities._sample_seconds(positions, 2, 10_800) == 60
+
+
+def test_aggregates_nearby_consecutive_points_and_preserves_boundary() -> None:
+    positions = [
+        Position(datetime(2026, 1, 1, 10, 0, tzinfo=UTC), 47.5000, 19.0000, None),
+        Position(datetime(2026, 1, 1, 10, 20, tzinfo=UTC), 47.5001, 19.0001, None),
+        Position(datetime(2026, 1, 1, 10, 40, tzinfo=UTC), 47.5002, 19.0002, None),
+        Position(datetime(2026, 1, 1, 10, 50, tzinfo=UTC), 47.6000, 19.1000, None),
+    ]
+
+    aggregated = timeline_cities.aggregate_stationary_positions(
+        positions,
+        radius_m=500,
+        cluster_gap_seconds=3_600,
+        max_sample_gap_seconds=10_800,
+    )
+
+    assert len(aggregated) == 2
+    assert aggregated[0].sample_count == 3
+    assert aggregated[0].latitude == pytest.approx(47.5001)
+    assert aggregated[0].longitude == pytest.approx(19.0001)
+    assert aggregated[0].timestamp == positions[0].timestamp
+    assert aggregated[0].end_timestamp == positions[3].timestamp
+    assert aggregated[1].sample_count == 1
+    assert aggregated[1].end_timestamp == datetime(
+        2026,
+        1,
+        1,
+        10,
+        51,
+        tzinfo=UTC,
+    )
 
 
 def test_explicit_visit_is_split_across_local_midnight() -> None:

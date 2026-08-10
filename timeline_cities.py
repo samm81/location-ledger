@@ -17,6 +17,7 @@ import csv
 import math
 import re
 import sys
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -39,6 +40,29 @@ LAT_LNG_PATTERN = re.compile(
     r"(?P<longitude>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*°?\s*$",
     re.IGNORECASE,
 )
+GPX_FILENAME_PATTERN = re.compile(r"^\d{8}\.gpx$", re.IGNORECASE)
+OVERRIDES_DIRECTORY = Path("inputs") / "overrides"
+PLACE_MAPPINGS_FILENAME = "place-mappings.csv"
+TRIP_OVERRIDES_FILENAME = "trip-overrides.csv"
+PLACE_MAPPING_FIELDS = (
+    "From city",
+    "From country",
+    "To city",
+    "To country",
+)
+TRIP_OVERRIDE_FIELDS = (
+    "Arrival date",
+    "Departure date",
+    "City",
+    "Country",
+)
+TRIP_OUTPUT_FIELDS = (
+    "Arrival date",
+    "Departure date",
+    "Duration in days",
+    "City",
+    "Country",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +75,7 @@ class Position:
     accuracy_m: float | None
     end_timestamp: datetime | None = None
     source: str | None = None
+    sample_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,10 +109,12 @@ class CityScore:
         match: CityMatch,
         timezone_name: str,
         seconds: float,
+        *,
+        sample_count: int = 1,
     ) -> None:
         """Add one position's evidence."""
         self.seconds += seconds
-        self.positions += 1
+        self.positions += max(sample_count, 1)
         self.weighted_distance_km += match.distance_km * seconds
         self.rules[match.rule] += seconds
         self.timezones[timezone_name] += seconds
@@ -111,6 +138,24 @@ class Stay:
     def duration_days(self) -> int:
         """Return the elapsed calendar-day distance between the endpoints."""
         return (self.departure_date - self.arrival_date).days
+
+
+@dataclass(frozen=True, slots=True)
+class TripOverride:
+    """A manually forced or deleted stay for an inclusive date range."""
+
+    arrival_date: date
+    departure_date: date
+    city: str
+    country: str
+
+    @property
+    def is_delete(self) -> bool:
+        """Whether this override deletes rather than replaces a stay."""
+        return not self.city and not self.country
+
+
+PlaceMappingTable = dict[tuple[str, str], tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +208,9 @@ class RawSupport:
         )
 
 
+RawSupportIndex = dict[date, Counter[tuple[str, str]]]
+
+
 @dataclass(frozen=True, slots=True)
 class AuditRecord:
     """The raw stay and the conservative decision made for the fixed output."""
@@ -186,6 +234,8 @@ class Settings:
     regional_radius_km: float = 40.0
     max_accuracy_m: float = 50_000.0
     max_gap_hours: float = 3.0
+    cluster_radius_m: float = 500.0
+    cluster_gap_minutes: float = 60.0
 
 
 class TimezoneResolver:
@@ -195,6 +245,7 @@ class TimezoneResolver:
         self._fixed_name = timezone_name if timezone_name != "auto" else None
         self._fixed_zone: ZoneInfo | None = None
         self._finder: TimezoneFinder | None = None
+        self._cache: dict[tuple[float, float], tuple[ZoneInfo, str]] = {}
 
         if self._fixed_name is not None:
             try:
@@ -219,14 +270,22 @@ class TimezoneResolver:
         if self._fixed_name is not None and self._fixed_zone is not None:
             return self._fixed_zone, self._fixed_name
 
+        cache_key = (round(latitude, 3), round(longitude, 3))
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         assert self._finder is not None
         name = self._finder.timezone_at(
             lat=latitude,
             lng=longitude,
         )
         if name is None:
-            return ZoneInfo("UTC"), "UTC"
-        return ZoneInfo(name), name
+            result = (ZoneInfo("UTC"), "UTC")
+        else:
+            result = (ZoneInfo(name), name)
+        self._cache[cache_key] = result
+        return result
 
 
 class CityNormalizer:
@@ -451,6 +510,359 @@ def extract_raw_signal_positions(
     return positions
 
 
+def load_gpx_positions(directory: Path) -> list[Position]:
+    """Load timestamped track points from every YYYYMMDD.gpx file."""
+    if not directory.exists():
+        msg = f"GPX directory does not exist: {directory}"
+        raise ValueError(msg)
+    if not directory.is_dir():
+        msg = f"GPX path is not a directory: {directory}"
+        raise ValueError(msg)
+
+    files = sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".gpx"
+    )
+    if not files:
+        msg = f"GPX directory contains no .gpx files: {directory}"
+        raise ValueError(msg)
+
+    invalid_names = [
+        path.name for path in files if not GPX_FILENAME_PATTERN.fullmatch(path.name)
+    ]
+    if invalid_names:
+        msg = f"GPX filenames must use YYYYMMDD.gpx: {invalid_names[0]}"
+        raise ValueError(msg)
+
+    positions: list[Position] = []
+    for path in files:
+        try:
+            positions.extend(_extract_gpx_file(path))
+        except ET.ParseError as error:
+            msg = f"invalid GPX XML in {path.name}"
+            raise ValueError(msg) from error
+
+    positions.sort(key=lambda item: item.timestamp)
+    if not positions:
+        msg = f"GPX directory contains no usable track points: {directory}"
+        raise ValueError(msg)
+    return positions
+
+
+def _extract_gpx_file(path: Path) -> list[Position]:
+    """Extract valid track points from one GPX XML file."""
+    positions: list[Position] = []
+    for _event, element in ET.iterparse(path, events=("end",)):
+        if _xml_local_name(element.tag) != "trkpt":
+            continue
+        latitude_raw = element.get("lat")
+        longitude_raw = element.get("lon")
+        timestamp_raw = next(
+            (child.text for child in element if _xml_local_name(child.tag) == "time"),
+            None,
+        )
+        if (
+            not isinstance(latitude_raw, str)
+            or not isinstance(longitude_raw, str)
+            or not isinstance(timestamp_raw, str)
+        ):
+            element.clear()
+            continue
+        try:
+            latitude = float(latitude_raw)
+            longitude = float(longitude_raw)
+        except ValueError:
+            element.clear()
+            continue
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            element.clear()
+            continue
+        try:
+            timestamp = _parse_timestamp(timestamp_raw)
+        except ValueError:
+            element.clear()
+            continue
+        positions.append(
+            Position(
+                timestamp=timestamp,
+                latitude=latitude,
+                longitude=longitude,
+                accuracy_m=None,
+                source=f"gpx:{path.name}",
+            )
+        )
+        element.clear()
+    return positions
+
+
+def _xml_local_name(tag: str) -> str:
+    """Return an XML tag name without its namespace."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def merge_gpx_with_google_positions(
+    google_positions: Sequence[Position],
+    gpx_positions: Sequence[Position],
+    *,
+    max_gap_seconds: float,
+    aggregate: bool = True,
+    cluster_radius_m: float = 500.0,
+    cluster_gap_seconds: float = 3_600.0,
+) -> list[Position]:
+    """Augment GPX coverage with Google positions outside it.
+
+    Each GPX point is authoritative until the next point, capped at the
+    configured interpolation gap. Google point and interval evidence is
+    retained only in the uncovered gaps, so it augments rather than overrides
+    the GPX stream.
+    """
+    if aggregate:
+        authoritative_positions = aggregate_stationary_positions(
+            gpx_positions,
+            radius_m=cluster_radius_m,
+            cluster_gap_seconds=cluster_gap_seconds,
+            max_sample_gap_seconds=max_gap_seconds,
+        )
+        google_positions = aggregate_stationary_positions(
+            google_positions,
+            radius_m=cluster_radius_m,
+            cluster_gap_seconds=cluster_gap_seconds,
+            max_sample_gap_seconds=max_gap_seconds,
+        )
+    else:
+        authoritative_positions = _gpx_positions_with_coverage(
+            gpx_positions,
+            max_gap_seconds=max_gap_seconds,
+        )
+    coverage = _merge_time_intervals(
+        [
+            (position.timestamp, position.end_timestamp)
+            for position in authoritative_positions
+            if position.end_timestamp is not None
+        ]
+    )
+    augmented_positions = [
+        retained
+        for position in google_positions
+        for retained in _retain_outside_intervals(position, coverage)
+    ]
+    return sorted(
+        [*authoritative_positions, *augmented_positions],
+        key=lambda item: item.timestamp,
+    )
+
+
+def aggregate_stationary_positions(
+    positions: Sequence[Position],
+    *,
+    radius_m: float,
+    cluster_gap_seconds: float,
+    max_sample_gap_seconds: float,
+) -> list[Position]:
+    """Collapse nearby consecutive point samples into representative intervals.
+
+    Explicit intervals are retained as barriers. Point samples are grouped only
+    when each new sample is close to the cluster's first point and follows the
+    previous sample within the configured time gap. This preserves movement
+    boundaries while reducing the number of city and timezone lookups.
+    """
+    ordered = sorted(positions, key=lambda item: item.timestamp)
+    aggregated: list[Position] = []
+    cluster: list[Position] = []
+    anchor: Position | None = None
+    previous: Position | None = None
+
+    def flush(next_timestamp: datetime | None) -> None:
+        nonlocal anchor, previous
+        if cluster:
+            aggregated.append(
+                _representative_position(
+                    cluster,
+                    next_timestamp=next_timestamp,
+                    max_sample_gap_seconds=max_sample_gap_seconds,
+                )
+            )
+            cluster.clear()
+        anchor = None
+        previous = None
+
+    for position in ordered:
+        is_interval = (
+            position.end_timestamp is not None
+            and position.end_timestamp > position.timestamp
+        )
+        if is_interval:
+            flush(position.timestamp)
+            aggregated.append(position)
+            continue
+
+        if not cluster:
+            cluster.append(position)
+            anchor = position
+            previous = position
+            continue
+
+        assert anchor is not None
+        assert previous is not None
+        gap_seconds = (position.timestamp - previous.timestamp).total_seconds()
+        distance_m = 1_000 * haversine_km(
+            anchor.latitude,
+            anchor.longitude,
+            position.latitude,
+            position.longitude,
+        )
+        if (
+            gap_seconds < 0
+            or gap_seconds > cluster_gap_seconds
+            or distance_m > radius_m
+        ):
+            flush(position.timestamp)
+            cluster.append(position)
+            anchor = position
+        else:
+            cluster.append(position)
+        previous = position
+
+    flush(None)
+    return aggregated
+
+
+def _representative_position(
+    cluster: Sequence[Position],
+    *,
+    next_timestamp: datetime | None,
+    max_sample_gap_seconds: float,
+) -> Position:
+    """Build a weighted-mean position for one stationary cluster."""
+    total_samples = sum(max(position.sample_count, 1) for position in cluster)
+    latitude = (
+        sum(position.latitude * max(position.sample_count, 1) for position in cluster)
+        / total_samples
+    )
+    longitude = (
+        sum(position.longitude * max(position.sample_count, 1) for position in cluster)
+        / total_samples
+    )
+    last_timestamp = cluster[-1].timestamp
+    if next_timestamp is not None:
+        gap_seconds = (next_timestamp - last_timestamp).total_seconds()
+    else:
+        gap_seconds = 0
+    if not 0 < gap_seconds <= max_sample_gap_seconds:
+        gap_seconds = DEFAULT_SAMPLE_SECONDS
+    source = cluster[0].source
+    if any(position.source != source for position in cluster[1:]):
+        source = "aggregated"
+    accuracies = [
+        position.accuracy_m for position in cluster if position.accuracy_m is not None
+    ]
+    return Position(
+        timestamp=cluster[0].timestamp,
+        latitude=latitude,
+        longitude=longitude,
+        accuracy_m=min(accuracies) if accuracies else None,
+        end_timestamp=last_timestamp + timedelta(seconds=gap_seconds),
+        source=source,
+        sample_count=total_samples,
+    )
+
+
+def _gpx_positions_with_coverage(
+    positions: Sequence[Position],
+    *,
+    max_gap_seconds: float,
+) -> list[Position]:
+    """Represent each GPX observation as a bounded authoritative interval."""
+    ordered = sorted(positions, key=lambda item: item.timestamp)
+    covered: list[Position] = []
+    for index, position in enumerate(ordered):
+        sample_seconds = DEFAULT_SAMPLE_SECONDS
+        if index + 1 < len(ordered):
+            delta = (ordered[index + 1].timestamp - position.timestamp).total_seconds()
+            if delta > 0:
+                sample_seconds = min(delta, max_gap_seconds)
+        covered.append(
+            Position(
+                timestamp=position.timestamp,
+                latitude=position.latitude,
+                longitude=position.longitude,
+                accuracy_m=position.accuracy_m,
+                end_timestamp=position.timestamp + timedelta(seconds=sample_seconds),
+                source=position.source,
+                sample_count=position.sample_count,
+            )
+        )
+    return covered
+
+
+def _merge_time_intervals(
+    intervals: Sequence[tuple[datetime, datetime | None]],
+) -> list[tuple[datetime, datetime]]:
+    """Merge overlapping finite time intervals."""
+    ordered = sorted(
+        ((start, end) for start, end in intervals if end is not None and start < end),
+        key=lambda item: item[0],
+    )
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _retain_outside_intervals(
+    position: Position,
+    intervals: Sequence[tuple[datetime, datetime]],
+) -> list[Position]:
+    """Keep or split Google evidence that is not covered by GPX."""
+    end = position.end_timestamp
+    if end is None or end <= position.timestamp:
+        if any(
+            start <= position.timestamp < interval_end
+            for start, interval_end in intervals
+        ):
+            return []
+        return [position]
+
+    retained: list[Position] = []
+    cursor = position.timestamp
+    for interval_start, interval_end in intervals:
+        if interval_end <= cursor:
+            continue
+        if interval_start >= end:
+            break
+        if cursor < interval_start:
+            retained.append(
+                _copy_position_interval(position, cursor, min(interval_start, end))
+            )
+        cursor = max(cursor, interval_end)
+        if cursor >= end:
+            break
+    if cursor < end:
+        retained.append(_copy_position_interval(position, cursor, end))
+    return retained
+
+
+def _copy_position_interval(
+    position: Position,
+    start: datetime,
+    end: datetime,
+) -> Position:
+    """Copy a position with a clipped interval."""
+    return Position(
+        timestamp=start,
+        latitude=position.latitude,
+        longitude=position.longitude,
+        accuracy_m=position.accuracy_m,
+        end_timestamp=end,
+        source=position.source,
+        sample_count=position.sample_count,
+    )
+
+
 def extract_semantic_positions(
     segments: Iterator[Mapping[str, Any]],
 ) -> list[Position]:
@@ -611,7 +1023,12 @@ def summarize_days(
             local_day, timezone_name = timezone_resolver.local_date(position)
             parts = [(local_day, timezone_name, seconds)]
         for local_day, timezone_name, seconds in parts:
-            scores[local_day][city_key].add(match, timezone_name, seconds)
+            scores[local_day][city_key].add(
+                match,
+                timezone_name,
+                seconds,
+                sample_count=position.sample_count,
+            )
 
     return scores
 
@@ -776,6 +1193,349 @@ def merge_stays(stays: Sequence[Stay]) -> list[Stay]:
     return merged
 
 
+def load_override_data(
+    base_directory: Path | None = None,
+) -> tuple[PlaceMappingTable, list[TripOverride]]:
+    """Load optional manual overrides from the current workflow directory."""
+    root = base_directory or Path.cwd()
+    override_directory = root / OVERRIDES_DIRECTORY
+    place_mappings_path = override_directory / PLACE_MAPPINGS_FILENAME
+    trip_overrides_path = override_directory / TRIP_OVERRIDES_FILENAME
+    place_mappings = (
+        load_place_mappings(place_mappings_path) if place_mappings_path.exists() else {}
+    )
+    trip_overrides = (
+        load_trip_overrides(trip_overrides_path) if trip_overrides_path.exists() else []
+    )
+    return place_mappings, trip_overrides
+
+
+def _read_override_rows(
+    path: Path,
+    expected_fields: Sequence[str],
+    optional_fields: set[str] | None = None,
+) -> Iterator[tuple[int, dict[str, str]]]:
+    """Read and validate one strict override CSV schema."""
+    optional = optional_fields or set()
+    with path.open("r", encoding="utf-8-sig", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        if reader.fieldnames != list(expected_fields):
+            actual_fields = ", ".join(reader.fieldnames or [])
+            expected = ", ".join(expected_fields)
+            msg = f"{path}: expected columns [{expected}], found [{actual_fields}]"
+            raise ValueError(msg)
+        for line_number, raw_row in enumerate(reader, start=2):
+            if None in raw_row:
+                msg = f"{path}: row {line_number} has extra columns"
+                raise ValueError(msg)
+            row: dict[str, str] = {}
+            for field_name in expected_fields:
+                value = raw_row.get(field_name)
+                if not isinstance(value, str) or (
+                    not value.strip() and field_name not in optional
+                ):
+                    msg = f"{path}: row {line_number} has an empty {field_name}"
+                    raise ValueError(msg)
+                row[field_name] = value.strip()
+            yield line_number, row
+
+
+def load_place_mappings(path: Path) -> PlaceMappingTable:
+    """Load exact city-country mappings and resolve mapping chains."""
+    mappings: PlaceMappingTable = {}
+    for line_number, row in _read_override_rows(path, PLACE_MAPPING_FIELDS):
+        source = (row["From city"], row["From country"])
+        target = (row["To city"], row["To country"])
+        if source in mappings:
+            msg = f"{path}: row {line_number} duplicates mapping source {source!r}"
+            raise ValueError(msg)
+        if source[1] != target[1]:
+            msg = f"{path}: row {line_number} changes country from {source[1]!r}"
+            raise ValueError(msg)
+        mappings[source] = target
+
+    resolved: PlaceMappingTable = {}
+    for source in mappings:
+        current = source
+        seen: set[tuple[str, str]] = set()
+        while current in mappings:
+            if current in seen:
+                msg = f"{path}: mapping cycle includes {current!r}"
+                raise ValueError(msg)
+            seen.add(current)
+            current = mappings[current]
+        resolved[source] = current
+    return resolved
+
+
+def load_trip_overrides(path: Path) -> list[TripOverride]:
+    """Load and validate inclusive manual trip ranges."""
+    overrides: list[TripOverride] = []
+    for line_number, row in _read_trip_override_rows(path):
+        arrival_date = _parse_override_date(
+            row["Arrival date"],
+            path=path,
+            line_number=line_number,
+            field_name="Arrival date",
+        )
+        departure_date = _parse_override_date(
+            row["Departure date"],
+            path=path,
+            line_number=line_number,
+            field_name="Departure date",
+        )
+        if departure_date < arrival_date:
+            msg = f"{path}: row {line_number} departs before it arrives"
+            raise ValueError(msg)
+        if bool(row["City"]) != bool(row["Country"]):
+            msg = (
+                f"{path}: row {line_number} must blank both City and Country to delete"
+            )
+            raise ValueError(msg)
+        overrides.append(
+            TripOverride(
+                arrival_date=arrival_date,
+                departure_date=departure_date,
+                city=row["City"],
+                country=row["Country"],
+            )
+        )
+
+    ordered = sorted(
+        overrides,
+        key=lambda item: (item.arrival_date, item.departure_date),
+    )
+    latest: TripOverride | None = None
+    for current in ordered:
+        if latest is not None and current.arrival_date < latest.departure_date:
+            msg = f"{path}: overlapping trip override ranges"
+            raise ValueError(msg)
+        if latest is None or current.departure_date > latest.departure_date:
+            latest = current
+    return ordered
+
+
+def _read_trip_override_rows(path: Path) -> Iterator[tuple[int, dict[str, str]]]:
+    """Read four-column overrides and copied five-column stay rows."""
+    with path.open("r", encoding="utf-8-sig", newline="") as input_file:
+        reader = csv.reader(input_file)
+        try:
+            header = next(reader)
+        except StopIteration as error:
+            msg = f"{path}: override CSV is empty"
+            raise ValueError(msg) from error
+        if header not in (list(TRIP_OVERRIDE_FIELDS), list(TRIP_OUTPUT_FIELDS)):
+            expected = ", ".join(TRIP_OVERRIDE_FIELDS)
+            msg = f"{path}: expected columns [{expected}]"
+            raise ValueError(msg)
+
+        for line_number, values in enumerate(reader, start=2):
+            if not values:
+                continue
+            if header == list(TRIP_OVERRIDE_FIELDS) and len(values) == 5:
+                if not _is_duration_value(values[2]):
+                    msg = f"{path}: row {line_number} has an invalid duration column"
+                    raise ValueError(msg)
+                values = [values[0], values[1], values[3], values[4]]
+            elif header == list(TRIP_OUTPUT_FIELDS) and len(values) == 5:
+                if values[2].strip() and not _is_duration_value(values[2]):
+                    msg = f"{path}: row {line_number} has an invalid duration column"
+                    raise ValueError(msg)
+                values = [values[0], values[1], values[3], values[4]]
+            elif len(values) != len(TRIP_OVERRIDE_FIELDS):
+                msg = f"{path}: row {line_number} has the wrong number of columns"
+                raise ValueError(msg)
+
+            row = {
+                field_name: value.strip()
+                for field_name, value in zip(TRIP_OVERRIDE_FIELDS, values)
+            }
+            for field_name in ("Arrival date", "Departure date"):
+                if not row[field_name]:
+                    msg = f"{path}: row {line_number} has an empty {field_name}"
+                    raise ValueError(msg)
+            if bool(row["City"]) != bool(row["Country"]):
+                msg = f"{path}: row {line_number} must blank both City and Country to delete"
+                raise ValueError(msg)
+            yield line_number, row
+
+
+def _is_duration_value(value: str) -> bool:
+    try:
+        int(value.strip())
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_override_date(
+    value: str,
+    *,
+    path: Path,
+    line_number: int,
+    field_name: str,
+) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        msg = f"{path}: row {line_number} has invalid {field_name}: {value!r}"
+        raise ValueError(msg) from error
+
+
+def apply_place_mappings(
+    stays: Sequence[Stay],
+    mappings: Mapping[tuple[str, str], tuple[str, str]],
+) -> tuple[list[Stay], list[AuditRecord]]:
+    """Apply persistent place mappings to fixed stays and audit changes."""
+    mapped_stays: list[Stay] = []
+    audit: list[AuditRecord] = []
+    for stay in stays:
+        source = (stay.city, stay.country)
+        target = mappings.get(source, source)
+        mapped = Stay(
+            arrival_date=stay.arrival_date,
+            departure_date=stay.departure_date,
+            city=target[0],
+            country=target[1],
+        )
+        mapped_stays.append(mapped)
+        if target != source:
+            audit.append(
+                _manual_audit_record(
+                    raw_stay=stay,
+                    fixed_stay=mapped,
+                    action="manual mapping",
+                    reason=(
+                        f"persistent place mapping: {source[0]}, {source[1]} "
+                        f"→ {target[0]}, {target[1]}"
+                    ),
+                )
+            )
+    return merge_stays(mapped_stays), audit
+
+
+def apply_trip_overrides(
+    stays: Sequence[Stay],
+    overrides: Sequence[TripOverride],
+    mappings: Mapping[tuple[str, str], tuple[str, str]] | None = None,
+) -> tuple[list[Stay], list[AuditRecord]]:
+    """Replace inclusive date ranges with manually forced city stays."""
+    current_stays = list(stays)
+    audit: list[AuditRecord] = []
+    place_mappings = mappings or {}
+    ordered_overrides = sorted(
+        overrides,
+        key=lambda item: (item.arrival_date, item.departure_date),
+    )
+    for override in ordered_overrides:
+        source_target = (override.city, override.country)
+        target = (
+            ("", "")
+            if override.is_delete
+            else place_mappings.get(source_target, source_target)
+        )
+        forced_stay = Stay(
+            arrival_date=override.arrival_date,
+            departure_date=override.departure_date,
+            city=target[0],
+            country=target[1],
+        )
+        remaining: list[Stay] = []
+        for stay in current_stays:
+            if override.is_delete and override.arrival_date == override.departure_date:
+                if (
+                    stay.arrival_date == override.arrival_date
+                    and stay.departure_date == override.departure_date
+                ):
+                    continue
+                remaining.append(stay)
+                continue
+            outside_before = stay.departure_date < forced_stay.arrival_date
+            outside_after = stay.arrival_date > forced_stay.departure_date
+            if outside_before or outside_after:
+                remaining.append(stay)
+                continue
+            if stay.arrival_date < forced_stay.arrival_date:
+                remaining.append(
+                    Stay(
+                        arrival_date=stay.arrival_date,
+                        departure_date=forced_stay.arrival_date,
+                        city=stay.city,
+                        country=stay.country,
+                    )
+                )
+            if stay.departure_date > forced_stay.departure_date:
+                remaining.append(
+                    Stay(
+                        arrival_date=forced_stay.departure_date,
+                        departure_date=stay.departure_date,
+                        city=stay.city,
+                        country=stay.country,
+                    )
+                )
+        if not override.is_delete:
+            remaining.append(forced_stay)
+        current_stays = merge_stays(
+            sorted(
+                remaining,
+                key=lambda item: (
+                    item.arrival_date,
+                    item.departure_date,
+                    item.city,
+                    item.country,
+                ),
+            )
+        )
+        if override.is_delete:
+            action = "manual delete"
+            reason = (
+                f"deleted the zero-day stay on {override.arrival_date.isoformat()}"
+                if override.arrival_date == override.departure_date
+                else (
+                    f"deleted stays from {override.arrival_date.isoformat()} through "
+                    f"{override.departure_date.isoformat()}"
+                )
+            )
+        else:
+            action = "manual trip override"
+            target_description = f"{target[0]}, {target[1]}"
+            source_description = f"{override.city}, {override.country}"
+            reason = (
+                f"forced {override.arrival_date.isoformat()} through "
+                f"{override.departure_date.isoformat()} as {target_description}"
+            )
+            if source_description != target_description:
+                reason += f" (canonicalized from {source_description})"
+        audit.append(
+            _manual_audit_record(
+                raw_stay=forced_stay,
+                fixed_stay=forced_stay,
+                action=action,
+                reason=reason,
+            )
+        )
+    return current_stays, audit
+
+
+def _manual_audit_record(
+    *,
+    raw_stay: Stay,
+    fixed_stay: Stay,
+    action: str,
+    reason: str,
+) -> AuditRecord:
+    """Create an audit row for a manual change without raw-signal evidence."""
+    return AuditRecord(
+        raw_stay=raw_stay,
+        action=action,
+        fixed_city=fixed_stay.city,
+        fixed_country=fixed_stay.country,
+        confidence="manual",
+        reason=reason,
+        raw_support=RawSupport(total_points=0, candidate_points=0),
+    )
+
+
 def raw_support_for_stay(
     stay: Stay,
     raw_positions: Sequence[Position],
@@ -783,18 +1543,23 @@ def raw_support_for_stay(
     normalizer: CityNormalizer,
     timezone_resolver: TimezoneResolver,
     max_accuracy_m: float = 1_000.0,
+    raw_index: Mapping[date, Mapping[tuple[str, str], int]] | None = None,
 ) -> RawSupport:
     """Compare overlapping reliable raw points with a normalized stay."""
+    if raw_index is None:
+        raw_index = build_raw_support_index(
+            raw_positions,
+            normalizer=normalizer,
+            timezone_resolver=timezone_resolver,
+            max_accuracy_m=max_accuracy_m,
+        )
+
     counts: Counter[tuple[str, str]] = Counter()
     candidate_key = (stay.city, stay.country)
-    for position in raw_positions:
-        if position.accuracy_m is not None and position.accuracy_m > max_accuracy_m:
-            continue
-        local_day, _ = timezone_resolver.local_date(position)
-        if not stay.arrival_date <= local_day <= stay.departure_date:
-            continue
-        match = normalizer.match(position.latitude, position.longitude)
-        counts[(match.city, match.country)] += 1
+    local_day = stay.arrival_date
+    while local_day <= stay.departure_date:
+        counts.update(raw_index.get(local_day, {}))
+        local_day += timedelta(days=1)
 
     if not counts:
         return RawSupport(total_points=0, candidate_points=0)
@@ -807,6 +1572,27 @@ def raw_support_for_stay(
         dominant_country=dominant_key[1],
         dominant_points=dominant_points,
     )
+
+
+def build_raw_support_index(
+    raw_positions: Sequence[Position],
+    *,
+    normalizer: CityNormalizer,
+    timezone_resolver: TimezoneResolver,
+    max_accuracy_m: float,
+) -> RawSupportIndex:
+    """Index reliable raw evidence once by its effective local calendar date."""
+    index: defaultdict[date, Counter[tuple[str, str]]] = defaultdict(Counter)
+    for position in raw_positions:
+        if position.accuracy_m is not None and position.accuracy_m > max_accuracy_m:
+            continue
+        local_day, _ = timezone_resolver.local_date(position)
+        match = normalizer.match(position.latitude, position.longitude)
+        index[local_day][(match.city, match.country)] += max(
+            position.sample_count,
+            1,
+        )
+    return dict(index)
 
 
 def repair_stays(
@@ -833,6 +1619,14 @@ def repair_stays(
 
     replacements: dict[int, Stay] = {}
     audit: list[AuditRecord] = []
+    raw_index: RawSupportIndex | None = None
+    if normalizer is not None and timezone_resolver is not None:
+        raw_index = build_raw_support_index(
+            raw_positions,
+            normalizer=normalizer,
+            timezone_resolver=timezone_resolver,
+            max_accuracy_m=raw_support_max_accuracy_m,
+        )
     for index, stay in enumerate(stays):
         raw_support = RawSupport(total_points=0, candidate_points=0)
         if normalizer is not None and timezone_resolver is not None:
@@ -842,6 +1636,7 @@ def repair_stays(
                 normalizer=normalizer,
                 timezone_resolver=timezone_resolver,
                 max_accuracy_m=raw_support_max_accuracy_m,
+                raw_index=raw_index,
             )
         replacement: Stay | None = None
         reason = "raw evidence unavailable"
@@ -1029,6 +1824,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", type=Path, help="Google Timeline export JSON")
     parser.add_argument(
+        "--gpx-directory",
+        "--gpx-dir",
+        dest="gpx_directory",
+        type=Path,
+        help="directory of authoritative YYYYMMDD.gpx track files",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=Path,
@@ -1054,6 +1856,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=3.0,
         help="maximum interval credited to a position (default: 3)",
+    )
+    parser.add_argument(
+        "--cluster-radius-m",
+        type=float,
+        default=500.0,
+        help="group consecutive samples within this radius (default: 500)",
+    )
+    parser.add_argument(
+        "--cluster-gap-minutes",
+        type=float,
+        default=60.0,
+        help="group consecutive samples no farther apart than this time (default: 60)",
     )
     parser.add_argument(
         "--max-isolated-days",
@@ -1086,6 +1900,8 @@ def run(arguments: Sequence[str] | None = None) -> int:
         regional_radius_km=args.regional_radius_km,
         max_accuracy_m=args.max_accuracy_m,
         max_gap_hours=args.max_gap_hours,
+        cluster_radius_m=args.cluster_radius_m,
+        cluster_gap_minutes=args.cluster_gap_minutes,
     )
 
     try:
@@ -1095,12 +1911,44 @@ def run(arguments: Sequence[str] | None = None) -> int:
         _positive(settings.regional_radius_km, "--regional-radius-km")
         _positive(settings.max_accuracy_m, "--max-accuracy-m")
         _positive(settings.max_gap_hours, "--max-gap-hours")
+        _positive(settings.cluster_radius_m, "--cluster-radius-m")
+        _positive(settings.cluster_gap_minutes, "--cluster-gap-minutes")
         _nonnegative(args.max_isolated_days, "--max-isolated-days")
         timezone_resolver = TimezoneResolver(args.timezone)
         position_data = load_position_data(
             args.input,
             max_accuracy_m=settings.max_accuracy_m,
         )
+        if args.gpx_directory is not None:
+            gpx_positions = load_gpx_positions(args.gpx_directory)
+            position_data = LoadedPositionData(
+                positions=merge_gpx_with_google_positions(
+                    position_data.positions,
+                    gpx_positions,
+                    max_gap_seconds=settings.max_gap_hours * 3_600,
+                    aggregate=True,
+                    cluster_radius_m=settings.cluster_radius_m,
+                    cluster_gap_seconds=settings.cluster_gap_minutes * 60,
+                ),
+                raw_positions=merge_gpx_with_google_positions(
+                    position_data.raw_positions,
+                    gpx_positions,
+                    max_gap_seconds=settings.max_gap_hours * 3_600,
+                    aggregate=False,
+                ),
+                source=f"{position_data.source}+gpx",
+            )
+        else:
+            position_data = LoadedPositionData(
+                positions=aggregate_stationary_positions(
+                    position_data.positions,
+                    radius_m=settings.cluster_radius_m,
+                    cluster_gap_seconds=settings.cluster_gap_minutes * 60,
+                    max_sample_gap_seconds=settings.max_gap_hours * 3_600,
+                ),
+                raw_positions=position_data.raw_positions,
+                source=position_data.source,
+            )
         positions = position_data.positions
         if not positions:
             msg = "no usable position signals found"
@@ -1121,6 +1969,17 @@ def run(arguments: Sequence[str] | None = None) -> int:
             normalizer=normalizer,
             timezone_resolver=timezone_resolver,
         )
+        place_mappings, trip_overrides = load_override_data()
+        mapped_stays, mapping_audit = apply_place_mappings(
+            fixed_stays,
+            place_mappings,
+        )
+        fixed_stays, trip_override_audit = apply_trip_overrides(
+            mapped_stays,
+            trip_overrides,
+            place_mappings,
+        )
+        audit_records.extend([*mapping_audit, *trip_override_audit])
         raw_path, audit_path, fixed_path = output_paths(args.input, args.output)
         with raw_path.open("w", encoding="utf-8", newline="") as raw_file:
             write_stays_csv(raw_stays, raw_file)
