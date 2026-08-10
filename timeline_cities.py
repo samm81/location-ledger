@@ -1817,6 +1817,27 @@ def output_paths(
     )
 
 
+def confirm_overwrite(
+    paths: Sequence[Path],
+    *,
+    input_file: TextIO | None = None,
+    output_file: TextIO | None = None,
+) -> bool:
+    """Ask before replacing any existing output file."""
+    existing_paths = [path for path in paths if path.exists()]
+    if not existing_paths:
+        return True
+
+    input_stream = input_file or sys.stdin
+    output_stream = output_file or sys.stderr
+    print("The following output files already exist:", file=output_stream)
+    for path in existing_paths:
+        print(f"  {path}", file=output_stream)
+    print("Overwrite them? [y/N] ", end="", file=output_stream, flush=True)
+    answer = input_stream.readline().strip().lower()
+    return answer in {"y", "yes"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -1981,6 +2002,11 @@ def run(arguments: Sequence[str] | None = None) -> int:
         )
         audit_records.extend([*mapping_audit, *trip_override_audit])
         raw_path, audit_path, fixed_path = output_paths(args.input, args.output)
+        if not confirm_overwrite((raw_path, audit_path, fixed_path)):
+            print(
+                "aborted: existing output files were not overwritten", file=sys.stderr
+            )
+            return 1
         with raw_path.open("w", encoding="utf-8", newline="") as raw_file:
             write_stays_csv(raw_stays, raw_file)
         with audit_path.open("w", encoding="utf-8", newline="") as audit_file:

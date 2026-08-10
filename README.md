@@ -109,6 +109,10 @@ Each run writes three files using the output prefix. For the command above:
 - `cities.audit.csv` records every raw stay, automatic correction, and manual change.
 - `cities.fixed.csv` contains the automatically corrected and manually overridden stays.
 
+If any output file already exists, the script lists the files and prompts before
+overwriting them. Only `y` or `yes` proceeds; blank input, `n`, or end-of-file aborts
+the run without changing existing outputs.
+
 ## Manual overrides
 
 The script optionally loads these files from the current working directory:

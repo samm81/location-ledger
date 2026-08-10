@@ -780,6 +780,66 @@ def test_run_end_to_end(
     assert fixed_path.exists()
 
 
+def test_run_does_not_overwrite_without_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_path = tmp_path / "timeline.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "semanticSegments": [],
+                "rawSignals": [
+                    {
+                        "position": {
+                            "LatLng": "47.5°, 19.05°",
+                            "timestamp": "2026-07-17T15:57:58.174Z",
+                        }
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    raw_path = tmp_path / "cities.raw.csv"
+    raw_path.write_text("keep this file", encoding="utf-8")
+    monkeypatch.setattr(timeline_cities.sys, "stdin", io.StringIO("n\n"))
+
+    result = timeline_cities.run(
+        [
+            str(input_path),
+            "--output",
+            str(tmp_path / "cities"),
+            "--timezone",
+            "Europe/Budapest",
+        ]
+    )
+
+    assert result == 1
+    assert raw_path.read_text(encoding="utf-8") == "keep this file"
+
+
+def test_confirm_overwrite_accepts_yes_and_defaults_to_no(tmp_path: Path) -> None:
+    existing_path = tmp_path / "existing.csv"
+    existing_path.write_text("existing", encoding="utf-8")
+
+    no_output = io.StringIO()
+    assert not timeline_cities.confirm_overwrite(
+        [existing_path],
+        input_file=io.StringIO("\n"),
+        output_file=no_output,
+    )
+    assert str(existing_path) in no_output.getvalue()
+
+    yes_output = io.StringIO()
+    assert timeline_cities.confirm_overwrite(
+        [existing_path],
+        input_file=io.StringIO("yes\n"),
+        output_file=yes_output,
+    )
+
+
 def test_run_auto_discovers_overrides_from_working_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
