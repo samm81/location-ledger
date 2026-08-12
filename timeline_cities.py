@@ -424,7 +424,7 @@ def load_position_data(
     *,
     max_accuracy_m: float,
 ) -> LoadedPositionData:
-    """Load primary evidence and any raw signals available for validation."""
+    """Load semantic evidence and raw signals for validation."""
     is_array = _first_json_byte(path) == b"["
     raw_positions: list[Position] = []
     semantic_positions: list[Position] = []
@@ -1583,7 +1583,6 @@ def build_raw_support_index(
 def repair_stays(
     stays: Sequence[Stay],
     *,
-    max_isolated_days: int = 1,
     raw_positions: Sequence[Position] = (),
     normalizer: CityNormalizer | None = None,
     timezone_resolver: TimezoneResolver | None = None,
@@ -1591,12 +1590,11 @@ def repair_stays(
     raw_support_ratio: float = 0.75,
     min_raw_support_points: int = 3,
 ) -> tuple[list[Stay], list[AuditRecord]]:
-    """Apply only an isolated pattern contradicted by reliable raw signals.
+    """Replace stays strongly contradicted by reliable raw signals.
 
-    A short middle stay is corrected only when the surrounding stays are the same
-    city, have no date gaps, the middle stay is at most ``max_isolated_days``, and
-    overlapping raw signals strongly support the surrounding city. All decisions
-    are recorded in the audit output.
+    Raw signals override the city reported by semantic Timeline data when enough
+    overlapping points strongly support a different city. All decisions are
+    recorded in the audit output.
     """
     if raw_positions and (normalizer is None or timezone_resolver is None):
         msg = "normalizer and timezone_resolver are required for raw support"
@@ -1641,48 +1639,22 @@ def repair_stays(
             else:
                 reason = "raw signals are mixed"
                 confidence = "review"
-        if 0 < index < len(stays) - 1:
-            previous = stays[index - 1]
-            following = stays[index + 1]
-            surrounded_by_same_city = (
-                previous.city == following.city
-                and previous.country == following.country
-                and previous.departure_date == stay.arrival_date
-                and stay.departure_date == following.arrival_date
-                and stay.city != previous.city
+        strong_contradiction = (
+            raw_support.total_points >= min_raw_support_points
+            and raw_support.dominant_ratio >= raw_support_ratio
+            and raw_support.contradicts_candidate
+        )
+        if strong_contradiction:
+            replacement = Stay(
+                arrival_date=stay.arrival_date,
+                departure_date=stay.departure_date,
+                city=raw_support.dominant_city,
+                country=raw_support.dominant_country,
             )
-            strong_contradiction = (
-                raw_support.total_points >= min_raw_support_points
-                and raw_support.dominant_ratio >= raw_support_ratio
-                and raw_support.contradicts_candidate
-                and raw_support.dominant_city == previous.city
-                and raw_support.dominant_country == previous.country
-            )
-            if (
-                surrounded_by_same_city
-                and stay.duration_days <= max_isolated_days
-                and strong_contradiction
-            ):
-                replacement = Stay(
-                    arrival_date=stay.arrival_date,
-                    departure_date=stay.departure_date,
-                    city=previous.city,
-                    country=previous.country,
-                )
-                replacements[index] = replacement
-                action = "fixed"
-                confidence = "high"
-                reason = (
-                    "isolated short stay contradicted by raw signals from the "
-                    "surrounding city"
-                )
-            elif surrounded_by_same_city and stay.duration_days <= max_isolated_days:
-                action = "review"
-                confidence = "review"
-                reason = (
-                    "isolated short stay retained because raw support is absent, "
-                    "mixed, or supports the reported city"
-                )
+            replacements[index] = replacement
+            action = "fixed"
+            confidence = "high"
+            reason = "stay overridden by dominant raw-signal evidence"
 
         fixed_stay = replacement or stay
         audit.append(
@@ -1884,24 +1856,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=60.0,
         help="group consecutive samples no farther apart than this time (default: 60)",
     )
-    parser.add_argument(
-        "--max-isolated-days",
-        type=int,
-        default=1,
-        help="automatically replace isolated stays up to this length (default: 1)",
-    )
     return parser
 
 
 def _positive(value: float, name: str) -> None:
     if value <= 0:
         msg = f"{name} must be greater than zero"
-        raise ValueError(msg)
-
-
-def _nonnegative(value: int, name: str) -> None:
-    if value < 0:
-        msg = f"{name} must not be negative"
         raise ValueError(msg)
 
 
@@ -1931,7 +1891,6 @@ def run(arguments: Sequence[str] | None = None) -> int:
         _positive(settings.max_gap_hours, "--max-gap-hours")
         _positive(settings.cluster_radius_m, "--cluster-radius-m")
         _positive(settings.cluster_gap_minutes, "--cluster-gap-minutes")
-        _nonnegative(args.max_isolated_days, "--max-isolated-days")
         timezone_resolver = TimezoneResolver()
         position_data = LoadedPositionData([], [], "none")
         if args.google_timeline is not None:
@@ -1984,7 +1943,6 @@ def run(arguments: Sequence[str] | None = None) -> int:
         raw_stays = build_stays(scores)
         fixed_stays, audit_records = repair_stays(
             raw_stays,
-            max_isolated_days=args.max_isolated_days,
             raw_positions=position_data.raw_positions,
             normalizer=normalizer,
             timezone_resolver=timezone_resolver,

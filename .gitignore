@@ -2,3 +2,5 @@
 .pytest_cache/
 .ruff_cache/
 __pycache__/
+inputs/overrides/place-mappings.csv
+inputs/overrides/trip-overrides.csv

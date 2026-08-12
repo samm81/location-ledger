@@ -461,7 +461,7 @@ def test_semantic_timestamp_uses_explicit_location_offset(tmp_path: Path) -> Non
     )
 
 
-def test_phone_export_prefers_semantic_segments(tmp_path: Path) -> None:
+def test_phone_export_keeps_raw_signals_for_validation(tmp_path: Path) -> None:
     input_path = tmp_path / "location-history.json"
     input_path.write_text(
         json.dumps(
@@ -698,16 +698,16 @@ def test_transition_day_is_shared_when_incoming_city_has_evidence() -> None:
     ]
 
 
-def test_repair_replaces_only_isolated_one_day_stay(
+def test_repair_replaces_a_four_day_stay_from_raw_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw_stays = [
         timeline_cities.Stay(
             date(2026, 7, 17), date(2026, 7, 18), "Budapest", "Hungary"
         ),
-        timeline_cities.Stay(date(2026, 7, 18), date(2026, 7, 19), "Vienna", "Austria"),
+        timeline_cities.Stay(date(2026, 7, 18), date(2026, 7, 22), "Vienna", "Austria"),
         timeline_cities.Stay(
-            date(2026, 7, 19), date(2026, 7, 20), "Budapest", "Hungary"
+            date(2026, 7, 22), date(2026, 7, 23), "Budapest", "Hungary"
         ),
     ]
 
@@ -740,23 +740,13 @@ def test_repair_replaces_only_isolated_one_day_stay(
 
     assert fixed_stays == [
         timeline_cities.Stay(
-            date(2026, 7, 17), date(2026, 7, 20), "Budapest", "Hungary"
+            date(2026, 7, 17), date(2026, 7, 23), "Budapest", "Hungary"
         )
     ]
     assert [record.action for record in audit] == ["kept", "fixed", "kept"]
     assert audit[1].fixed_city == "Budapest"
     assert audit[1].raw_support.total_points == 3
     assert audit[1].raw_support.dominant_ratio == 1.0
-
-    disabled_stays, disabled_audit = timeline_cities.repair_stays(
-        raw_stays,
-        max_isolated_days=0,
-        raw_positions=raw_positions,
-        normalizer=normalizer,
-        timezone_resolver=timezone_resolver,
-    )
-    assert disabled_stays == raw_stays
-    assert all(record.action == "kept" for record in disabled_audit)
 
 
 def test_run_end_to_end(

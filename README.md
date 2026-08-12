@@ -59,7 +59,7 @@ The command writes `cities.raw.csv`, `cities.audit.csv`, and the final `cities.c
 - **Combines sources:** accepts Google Maps Timeline data, [GPSLogger][2] GPX data, or both, with GPX taking priority over overlapping Google records.
 - **Normalizes places:** reverse-geocodes locally and rounds districts and suburbs toward larger sensible city names.
 - **Assigns local dates:** converts UTC timestamps to the timezone at each coordinate before grouping points into city stays.
-- **Corrects cautiously:** repairs short, isolated mismatches only when raw signal evidence supports the correction. It does not use legacy `timelineEdits` data.
+- **Corrects from raw evidence:** lets reliable raw signals override a conflicting Google Maps inferred stay, regardless of its duration. It does not use legacy `timelineEdits` data.
 
 No location data is sent to a reverse-geocoding service.
 
@@ -85,10 +85,10 @@ Example:
 
 The repository includes header-only templates in `inputs/overrides/`:
 
-- `place-mappings.csv` maps one exact city and country to another place in the same country.
-- `trip-overrides.csv` forces an inclusive date range to one city and country.
+- `place-mappings.example.csv` maps one exact city and country to another place in the same country.
+- `trip-overrides.example.csv` forces an inclusive date range to one city and country.
 
-Add rows to these files before running the script. To delete one zero-day stay without deleting neighboring stays, leave `City` and `Country` blank for that exact date.
+Copy each example to `place-mappings.csv` or `trip-overrides.csv`, then add your rows before running the script. Those personal files are ignored by Git. To delete one zero-day stay without deleting neighboring stays, leave `City` and `Country` blank for that exact date.
 
 ## Options
 
@@ -99,7 +99,6 @@ Add rows to these files before running the script. To delete one zero-day stay w
 | `--major-population`, `--major-radius-km` | `500000`, `75` | Prefer a major city within the configured radius. |
 | `--regional-population`, `--regional-radius-km` | `100000`, `40` | Use a smaller populated place when the major-city rule does not fit. |
 | `--cluster-radius-m`, `--cluster-gap-minutes` | `500`, `60` | Group nearby stationary samples to reduce repeated lookups. |
-| `--max-isolated-days` | `1` | Maximum isolated stay length eligible for raw-signal correction. |
 
 Run `uv run timeline_cities.py --help` for signal-quality and time-gap options.
 
