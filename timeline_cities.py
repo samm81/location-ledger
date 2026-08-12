@@ -41,7 +41,6 @@ LAT_LNG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 GPX_FILENAME_PATTERN = re.compile(r"^\d{8}\.gpx$", re.IGNORECASE)
-OVERRIDES_DIRECTORY = Path("inputs") / "overrides"
 PLACE_MAPPINGS_FILENAME = "place-mappings.csv"
 TRIP_OVERRIDES_FILENAME = "trip-overrides.csv"
 PLACE_MAPPING_FIELDS = (
@@ -101,8 +100,10 @@ class CityScore:
     positions: int = 0
     weighted_distance_km: float = 0.0
     closest_match: CityMatch | None = None
-    rules: Counter[str] = field(default_factory=Counter)
-    timezones: Counter[str] = field(default_factory=Counter)
+    rules: defaultdict[str, float] = field(default_factory=lambda: defaultdict(float))
+    timezones: defaultdict[str, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
 
     def add(
         self,
@@ -1179,11 +1180,12 @@ def merge_stays(stays: Sequence[Stay]) -> list[Stay]:
 
 
 def load_override_data(
-    base_directory: Path | None = None,
+    override_directory: Path | None = None,
 ) -> tuple[PlaceMappingTable, list[TripOverride]]:
-    """Load optional manual overrides from the current workflow directory."""
-    root = base_directory or Path.cwd()
-    override_directory = root / OVERRIDES_DIRECTORY
+    """Load optional manual overrides from an explicitly selected directory."""
+    if override_directory is None:
+        return {}, []
+
     place_mappings_path = override_directory / PLACE_MAPPINGS_FILENAME
     trip_overrides_path = override_directory / TRIP_OVERRIDES_FILENAME
     place_mappings = (
@@ -1820,6 +1822,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory of authoritative GPSLogger YYYYMMDD.gpx track files",
     )
     parser.add_argument(
+        "--overrides-dir",
+        type=Path,
+        help=(
+            "directory containing optional place-mappings.csv and "
+            "trip-overrides.csv files"
+        ),
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=Path,
@@ -1947,7 +1957,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
             normalizer=normalizer,
             timezone_resolver=timezone_resolver,
         )
-        place_mappings, trip_overrides = load_override_data()
+        place_mappings, trip_overrides = load_override_data(args.overrides_dir)
         mapped_stays, mapping_audit = apply_place_mappings(
             fixed_stays,
             place_mappings,

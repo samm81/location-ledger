@@ -92,8 +92,8 @@ def test_raw_phone_timestamp_converts_to_coordinate_date(tmp_path: Path) -> None
     )
 
 
-def test_loads_manual_overrides_from_inputs_directory(tmp_path: Path) -> None:
-    override_directory = tmp_path / "inputs" / "overrides"
+def test_loads_manual_overrides_from_explicit_directory(tmp_path: Path) -> None:
+    override_directory = tmp_path / "overrides"
     override_directory.mkdir(parents=True)
     (override_directory / "place-mappings.csv").write_text(
         "\ufeffFrom city,From country,To city,To country\n"
@@ -107,7 +107,7 @@ def test_loads_manual_overrides_from_inputs_directory(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    mappings, overrides = timeline_cities.load_override_data(tmp_path)
+    mappings, overrides = timeline_cities.load_override_data(override_directory)
 
     assert mappings == {
         ("Midtown", "United States"): ("New York City", "United States"),
@@ -121,6 +121,18 @@ def test_loads_manual_overrides_from_inputs_directory(tmp_path: Path) -> None:
             "China",
         )
     ]
+
+
+def test_does_not_load_manual_overrides_without_directory(tmp_path: Path) -> None:
+    override_directory = tmp_path / "inputs" / "overrides"
+    override_directory.mkdir(parents=True)
+    (override_directory / "place-mappings.csv").write_text(
+        "From city,From country,To city,To country\n"
+        "Budapest,Hungary,Budapest Metro,Hungary\n",
+        encoding="utf-8",
+    )
+
+    assert timeline_cities.load_override_data() == ({}, [])
 
 
 def test_loads_blank_city_delete_override(tmp_path: Path) -> None:
@@ -853,7 +865,7 @@ def test_confirm_overwrite_accepts_yes_and_defaults_to_no(tmp_path: Path) -> Non
     )
 
 
-def test_run_auto_discovers_overrides_from_working_directory(
+def test_run_loads_overrides_from_explicit_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -875,7 +887,7 @@ def test_run_auto_discovers_overrides_from_working_directory(
         ),
         encoding="utf-8",
     )
-    override_directory = tmp_path / "inputs" / "overrides"
+    override_directory = tmp_path / "overrides"
     override_directory.mkdir(parents=True)
     (override_directory / "place-mappings.csv").write_text(
         "From city,From country,To city,To country\n"
@@ -890,6 +902,8 @@ def test_run_auto_discovers_overrides_from_working_directory(
             str(input_path),
             "--output",
             str(output_prefix),
+            "--overrides-dir",
+            str(override_directory),
         ]
     )
 

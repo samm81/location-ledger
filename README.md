@@ -1,12 +1,8 @@
-<div align="center">
-
 # Timeline Cities
 
 **Build a [Nomads.com-style timeline][1] from Android location data**
 
 Use one local script to turn Google Maps Timeline and [GPSLogger][2] tracks into city stays.
-
-</div>
 
 ## Purpose
 
@@ -83,28 +79,38 @@ Example:
 
 ## Manual overrides
 
-The repository includes header-only templates in `inputs/overrides/`:
+The repository includes header-only templates in `examples/overrides/`:
 
 - `place-mappings.example.csv` maps one exact city and country to another place in the same country.
 - `trip-overrides.example.csv` forces an inclusive date range to one city and country.
 
-Copy each example to `place-mappings.csv` or `trip-overrides.csv`, then add your rows before running the script. Those personal files are ignored by Git. To delete one zero-day stay without deleting neighboring stays, leave `City` and `Country` blank for that exact date.
+Copy each example to `place-mappings.csv` or `trip-overrides.csv` in a personal directory, then pass that directory with `--overrides-dir`. For example:
+
+```console
+mkdir -p inputs/overrides
+cp examples/overrides/place-mappings.example.csv inputs/overrides/place-mappings.csv
+cp examples/overrides/trip-overrides.example.csv inputs/overrides/trip-overrides.csv
+uv run timeline_cities.py \
+  --google-timeline location-history.json \
+  --overrides-dir inputs/overrides \
+  --output cities
+```
+
+The script does not load overrides unless `--overrides-dir` is provided. The personal files in `inputs/overrides/` are ignored by Git. To delete one zero-day stay without deleting neighboring stays, leave `City` and `Country` blank for that exact date.
 
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--google-timeline` | not set | Read an optional Google Maps Timeline export JSON. |
 | `--gpx-directory` | not set | Read [GPSLogger][2] `YYYYMMDD.gpx` tracks and augment them with Google data outside their coverage. |
+| `--overrides-dir` | not set | Read optional `place-mappings.csv` and `trip-overrides.csv` files from this directory. |
 | `--output` | Google Timeline filename or `cities` for GPX-only runs | Set the output filename prefix. |
 | `--major-population`, `--major-radius-km` | `500000`, `75` | Prefer a major city within the configured radius. |
 | `--regional-population`, `--regional-radius-km` | `100000`, `40` | Use a smaller populated place when the major-city rule does not fit. |
 | `--cluster-radius-m`, `--cluster-gap-minutes` | `500`, `60` | Group nearby stationary samples to reduce repeated lookups. |
 
 Run `uv run timeline_cities.py --help` for signal-quality and time-gap options.
-
-## License
-
-No project license has been declared. The city data used by [`reverse-geocode`][5] comes from [GeoNames][6] and is licensed under [CC BY 4.0][7].
 
 [1]: https://nomads.com/@athousandcups
 [2]: https://github.com/mendhak/gpslogger/
