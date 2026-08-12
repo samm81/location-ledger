@@ -8,7 +8,7 @@
 # ]
 # ///
 
-"""Convert a Google Timeline JSON export to consecutive normalized city stays."""
+"""Build a Nomads.com-style city timeline from Google Timeline and GPX data."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO, cast
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 import ijson  # ty: ignore[unresolved-import]  # PEP 723 dependency
 import reverse_geocode  # ty: ignore[unresolved-import]  # PEP 723 dependency
@@ -239,22 +239,11 @@ class Settings:
 
 
 class TimezoneResolver:
-    """Resolve a position to an IANA timezone, with an optional fixed override."""
+    """Resolve each position to its IANA timezone from its coordinates."""
 
-    def __init__(self, timezone_name: str) -> None:
-        self._fixed_name = timezone_name if timezone_name != "auto" else None
-        self._fixed_zone: ZoneInfo | None = None
-        self._finder: TimezoneFinder | None = None
+    def __init__(self) -> None:
+        self._finder = TimezoneFinder(in_memory=True)
         self._cache: dict[tuple[float, float], tuple[ZoneInfo, str]] = {}
-
-        if self._fixed_name is not None:
-            try:
-                self._fixed_zone = ZoneInfo(self._fixed_name)
-            except ZoneInfoNotFoundError as error:
-                msg = f"unknown IANA timezone: {self._fixed_name}"
-                raise ValueError(msg) from error
-        else:
-            self._finder = TimezoneFinder(in_memory=True)
 
     def local_date(self, position: Position) -> tuple[date, str]:
         """Return the local calendar date and timezone for a position."""
@@ -267,15 +256,11 @@ class TimezoneResolver:
 
     def zone_at(self, latitude: float, longitude: float) -> tuple[ZoneInfo, str]:
         """Return the timezone object and name for a coordinate."""
-        if self._fixed_name is not None and self._fixed_zone is not None:
-            return self._fixed_zone, self._fixed_name
-
         cache_key = (round(latitude, 3), round(longitude, 3))
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
 
-        assert self._finder is not None
         name = self._finder.timezone_at(
             lat=latitude,
             lng=longitude,
@@ -1804,16 +1789,21 @@ def write_audit_csv(records: Sequence[AuditRecord], output_file: TextIO) -> None
 
 
 def output_paths(
-    input_path: Path, output_prefix: Path | None
+    input_path: Path | None, output_prefix: Path | None
 ) -> tuple[Path, Path, Path]:
-    """Return raw, audit, and fixed output paths."""
-    prefix = output_prefix or input_path.with_suffix("")
+    """Return raw, audit, and final-result output paths."""
+    if output_prefix is not None:
+        prefix = output_prefix
+    elif input_path is not None:
+        prefix = input_path.with_suffix("")
+    else:
+        prefix = Path("cities")
     if prefix.suffix.lower() == ".csv":
         prefix = prefix.with_suffix("")
     return (
         prefix.with_name(f"{prefix.name}.raw.csv"),
         prefix.with_name(f"{prefix.name}.audit.csv"),
-        prefix.with_name(f"{prefix.name}.fixed.csv"),
+        prefix.with_name(f"{prefix.name}.csv"),
     )
 
 
@@ -1841,26 +1831,30 @@ def confirm_overwrite(
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(
-        description="Convert Google Timeline JSON to consecutive normalized city stays."
+        description=(
+            "Build a city timeline from Google Maps Timeline and/or GPSLogger GPX data."
+        )
     )
-    parser.add_argument("input", type=Path, help="Google Timeline export JSON")
+    parser.add_argument(
+        "--google-timeline",
+        type=Path,
+        help="Google Maps Timeline export JSON",
+    )
     parser.add_argument(
         "--gpx-directory",
         "--gpx-dir",
         dest="gpx_directory",
         type=Path,
-        help="directory of authoritative YYYYMMDD.gpx track files",
+        help="directory of authoritative GPSLogger YYYYMMDD.gpx track files",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="output filename prefix (default: input filename)",
-    )
-    parser.add_argument(
-        "--timezone",
-        default="auto",
-        help='IANA timezone for all records, or "auto" per coordinate (default: auto)',
+        help=(
+            "output filename prefix (default: Google Timeline filename or cities "
+            "for GPX-only runs)"
+        ),
     )
     parser.add_argument("--major-population", type=int, default=500_000)
     parser.add_argument("--major-radius-km", type=float, default=75.0)
@@ -1926,6 +1920,9 @@ def run(arguments: Sequence[str] | None = None) -> int:
     )
 
     try:
+        if args.google_timeline is None and args.gpx_directory is None:
+            msg = "provide --google-timeline and/or --gpx-directory"
+            raise ValueError(msg)
         _positive(settings.major_population, "--major-population")
         _positive(settings.major_radius_km, "--major-radius-km")
         _positive(settings.regional_population, "--regional-population")
@@ -1935,11 +1932,13 @@ def run(arguments: Sequence[str] | None = None) -> int:
         _positive(settings.cluster_radius_m, "--cluster-radius-m")
         _positive(settings.cluster_gap_minutes, "--cluster-gap-minutes")
         _nonnegative(args.max_isolated_days, "--max-isolated-days")
-        timezone_resolver = TimezoneResolver(args.timezone)
-        position_data = load_position_data(
-            args.input,
-            max_accuracy_m=settings.max_accuracy_m,
-        )
+        timezone_resolver = TimezoneResolver()
+        position_data = LoadedPositionData([], [], "none")
+        if args.google_timeline is not None:
+            position_data = load_position_data(
+                args.google_timeline,
+                max_accuracy_m=settings.max_accuracy_m,
+            )
         if args.gpx_directory is not None:
             gpx_positions = load_gpx_positions(args.gpx_directory)
             position_data = LoadedPositionData(
@@ -2001,8 +2000,10 @@ def run(arguments: Sequence[str] | None = None) -> int:
             place_mappings,
         )
         audit_records.extend([*mapping_audit, *trip_override_audit])
-        raw_path, audit_path, fixed_path = output_paths(args.input, args.output)
-        if not confirm_overwrite((raw_path, audit_path, fixed_path)):
+        raw_path, audit_path, final_path = output_paths(
+            args.google_timeline, args.output
+        )
+        if not confirm_overwrite((raw_path, audit_path, final_path)):
             print(
                 "aborted: existing output files were not overwritten", file=sys.stderr
             )
@@ -2011,11 +2012,11 @@ def run(arguments: Sequence[str] | None = None) -> int:
             write_stays_csv(raw_stays, raw_file)
         with audit_path.open("w", encoding="utf-8", newline="") as audit_file:
             write_audit_csv(audit_records, audit_file)
-        with fixed_path.open("w", encoding="utf-8", newline="") as fixed_file:
-            write_stays_csv(fixed_stays, fixed_file)
+        with final_path.open("w", encoding="utf-8", newline="") as final_file:
+            write_stays_csv(fixed_stays, final_file)
         print(f"raw: {raw_path}", file=sys.stderr)
         print(f"audit: {audit_path}", file=sys.stderr)
-        print(f"fixed: {fixed_path}", file=sys.stderr)
+        print(f"final: {final_path}", file=sys.stderr)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

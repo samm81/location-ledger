@@ -1,180 +1,116 @@
-# Google Timeline cities
+<div align="center">
 
-`timeline_cities.py` converts a Google Timeline JSON export into consecutive,
-normalized city stays. All location processing and reverse geocoding happens
-locally.
+# Timeline Cities
 
-## Run
+**Build a [Nomads.com-style timeline][1] from Android location data**
 
-Install [`uv`](https://docs.astral.sh/uv/) and run:
+Use one local script to turn Google Maps Timeline and [GPSLogger][2] tracks into city stays.
+
+</div>
+
+## Purpose
+
+This is a personal-use script for creating a [Nomads.com-style timeline][1] from my own travel data. It accepts an Android Google Maps Timeline export, [GPSLogger][2] GPX data, or both.
+
+At least one source is required.
+
+When both sources cover the same period, [GPSLogger][2] data wins. Google Maps Timeline data only augments gaps outside the GPX coverage.
+
+The workflow is tailored to this data and this output format. It is not a general-purpose location-history application.
+
+## Requirements
+
+- Python 3.11 or newer.
+- [uv][3].
+- An Android Google Maps Timeline export, [GPSLogger][2] GPX data, or both.
+
+The script header declares its Python dependencies in a format that [uv][3] can auto-install when you run the script with `uv run`.
+
+## Quickstart
+
+1. Export Google Maps Timeline data on Android if you want to use it. Open **Settings > Location > Location services > Timeline > Export Timeline data**, then choose where to save the file. See [Google's Android export instructions][4].
+
+2. Configure [GPSLogger][2] to save GPX tracks if you want to use them. By default, it should save files with `YYYYMMDD.gpx` file names, such as `20260722.gpx`.
+
+3. Run the converter from the repository directory with either source or both:
 
 ```console
-./timeline_cities.py location-history.json -o cities
-```
+# Google Maps Timeline only
+uv run timeline_cities.py \
+  --google-timeline location-history.json \
+  --output cities
 
-To use GPSLogger GPX tracks as the authoritative location stream:
+# GPX only
+uv run timeline_cities.py --gpx-directory ./gpx --output cities
 
-```console
-./timeline_cities.py location-history.json \
+# Both sources: GPX wins where it covers the same time
+uv run timeline_cities.py \
+  --google-timeline location-history.json \
   --gpx-directory ./gpx \
-  -o cities
+  --output cities
+
+cat cities.csv
 ```
 
-The script's PEP 723 metadata lets `uv` create an isolated environment and install
-the required packages automatically. The first run downloads the GeoNames-derived
-city index and timezone boundary data. Later runs use the local cache and require no
-geocoding service.
+The command writes `cities.raw.csv`, `cities.audit.csv`, and the final `cities.csv`.
 
-The current phone export format is accepted:
+## What this script does
 
-- Phone exports containing `semanticSegments`, `rawSignals`, and
-  `userLocationProfile`.
-- Direct sample arrays such as `semanticSegments.json` and `rawSignals.json`.
+- **Combines sources:** accepts Google Maps Timeline data, [GPSLogger][2] GPX data, or both, with GPX taking priority over overlapping Google records.
+- **Normalizes places:** reverse-geocodes locally and rounds districts and suburbs toward larger sensible city names.
+- **Assigns local dates:** converts UTC timestamps to the timezone at each coordinate before grouping points into city stays.
+- **Corrects cautiously:** repairs short, isolated mismatches only when raw signal evidence supports the correction. It does not use legacy `timelineEdits` data.
 
-When semantic segments are available, the script prefers them over raw signals.
-Visits provide explicit start/end times and inferred place coordinates. Timeline
-paths and activity endpoints provide supplementary evidence. Raw GPS positions are
-used only when semantic location evidence is unavailable.
+No location data is sent to a reverse-geocoding service.
 
-When `--gpx-directory` is supplied, the `YYYYMMDD.gpx` track points become the
-authoritative stream wherever they have reliable coverage. Google semantic and
-raw positions augment the uncovered gaps, but overlapping Google evidence is
-clipped or discarded so it cannot override GPX. GPX `<time>` values are parsed
-as instants, including the UTC `Z` suffix, and are converted to the timezone at
-each coordinate before assigning dates.
+## Outputs
 
-## City normalization
+For `--output cities`, the script creates:
 
-For every usable position, the script:
+- `cities.raw.csv`: normalized stays before corrections and manual overrides.
+- `cities.audit.csv`: raw stays, automatic corrections, and manual changes.
+- `cities.csv`: the final corrected result.
 
-1. Chooses the nearest city with at least 500,000 residents when it is no more than
-   75 km away and in the same country.
-2. Otherwise chooses the nearest city with at least 100,000 residents when it is no
-   more than 40 km away and in the same country.
-3. Otherwise keeps the nearest known populated place.
+Arrival and departure dates describe the stay's endpoints. If a move occurs on a shared transition date, that date appears in both adjacent rows intentionally, so the travel day is counted twice in the timeline. `Duration in days` remains the difference between the arrival and departure dates.
 
-This rounds nearby districts and suburbs toward major city names without assigning a
-remote major city to rural travel. The thresholds are configurable:
-
-```console
-./timeline_cities.py location-history.json \
-  --major-population 500000 \
-  --major-radius-km 75 \
-  --regional-population 100000 \
-  --regional-radius-km 40
-```
-
-Consecutive point samples within 500 meters and 60 minutes are collapsed into a
-time-bounded representative sample at their mean coordinate. This reduces repeated
-reverse-geocoder and timezone work while keeping explicit visits and movement
-boundaries separate. Tune those limits with `--cluster-radius-m` and
-`--cluster-gap-minutes`. Raw signals remain available individually for the audit and
-correction pass.
-
-Timestamps are normalized to UTC, then converted to the timezone at each data point
-before assigning a calendar date. Semantic visits and activities use their explicit
-`*TimezoneUtcOffsetMinutes` fields when present; otherwise the timestamp's own ISO
-offset is used. Use a fixed timezone when you want every record assigned to one date
-boundary:
-
-```console
-./timeline_cities.py location-history.json --timezone Europe/Budapest
-```
-
-The city with the most estimated time wins each internal daily assignment. Semantic
-visit durations are split across local midnight boundaries. For raw positions and
-path points, time is estimated from the next timestamp; gaps longer than three hours
-receive a neutral one-minute weight instead of being treated as continuous presence.
-When a new city has evidence on the previous city's final scored day, that day is
-used as the shared travel/transition date for both stays.
-
-## Output
+Example:
 
 ```csv
 "Arrival date","Departure date","Duration in days","City","Country"
-"2023-07-17","2023-08-03","17","Warsaw","Poland"
-"2023-08-04","2023-08-11","7","Prague","Czechia"
+"2026-07-15","2026-07-20","5","Budapest","Hungary"
+"2026-07-20","2026-07-25","5","Vienna","Austria"
 ```
-
-The departure date is the final or transition day. A same-day move therefore uses
-the same date as the previous stay's departure and the next stay's arrival.
-`Duration in days` remains `departure date - arrival date`, so the shared transition
-day is represented by both stays without being counted twice.
-
-## Three output files
-
-Each run writes three files using the output prefix. For the command above:
-
-- `cities.raw.csv` contains the unmodified normalized stays.
-- `cities.audit.csv` records every raw stay, automatic correction, and manual change.
-- `cities.fixed.csv` contains the automatically corrected and manually overridden stays.
-
-If any output file already exists, the script lists the files and prompts before
-overwriting them. Only `y` or `yes` proceeds; blank input, `n`, or end-of-file aborts
-the run without changing existing outputs.
 
 ## Manual overrides
 
-The script optionally loads these files from the current working directory:
+The repository includes header-only templates in `inputs/overrides/`:
 
-- `inputs/overrides/place-mappings.csv`
-- `inputs/overrides/trip-overrides.csv`
+- `place-mappings.csv` maps one exact city and country to another place in the same country.
+- `trip-overrides.csv` forces an inclusive date range to one city and country.
 
-Missing files are ignored. Existing files must use the exact headers shown below.
+Add rows to these files before running the script. To delete one zero-day stay without deleting neighboring stays, leave `City` and `Country` blank for that exact date.
 
-`place-mappings.csv` permanently maps an exact city-and-country pair to another
-city in the same country:
+## Options
 
-```csv
-"From city","From country","To city","To country"
-"Manhattan","United States","New York City","United States"
-```
+| Option | Default | Description |
+| --- | --- | --- |
+| `--gpx-directory` | not set | Read [GPSLogger][2] `YYYYMMDD.gpx` tracks and augment them with Google data outside their coverage. |
+| `--output` | Google Timeline filename or `cities` for GPX-only runs | Set the output filename prefix. |
+| `--major-population`, `--major-radius-km` | `500000`, `75` | Prefer a major city within the configured radius. |
+| `--regional-population`, `--regional-radius-km` | `100000`, `40` | Use a smaller populated place when the major-city rule does not fit. |
+| `--cluster-radius-m`, `--cluster-gap-minutes` | `500`, `60` | Group nearby stationary samples to reduce repeated lookups. |
+| `--max-isolated-days` | `1` | Maximum isolated stay length eligible for raw-signal correction. |
 
-Mapping chains are resolved, and cycles or cross-country mappings are rejected.
-Mappings affect `fixed.csv` and generate manual audit rows; `raw.csv` remains the
-algorithm-only baseline.
+Run `uv run timeline_cities.py --help` for signal-quality and time-gap options.
 
-`trip-overrides.csv` forces an inclusive date range to one city:
+## License
 
-```csv
-"Arrival date","Departure date","City","Country"
-"2026-04-30","2026-05-22","Tianjin","China"
-```
+No project license has been declared. The city data used by [`reverse-geocode`][5] comes from [GeoNames][6] and is licensed under [CC BY 4.0][7].
 
-Rows copied from a generated stay CSV may include a `Duration in days` column; that
-column is ignored when reading trip overrides.
-
-To delete a zero-day stay without deleting neighboring stays that share its
-transition date, leave both `City` and `Country` blank:
-
-```csv
-"Arrival date","Departure date","City","Country"
-"2026-05-15","2026-05-15","",""
-```
-
-Any existing stays that overlap the range are replaced, including gaps between
-stays. Partial overlaps are split at the override boundaries. Multiple overrides
-may share a transition date, but may not overlap beyond that shared date. Manual
-mapping, trip-override, and delete actions are appended to `audit.csv`.
-
-The first correction pass only fixes a one-day-or-less stay sandwiched between two
-matching stays in the same city when reliable overlapping raw signals contradict
-the middle stay. For example, a semantic `Beijing → Paris → Beijing` sequence is
-fixed only if the raw signals during the Paris stay remain in Beijing. A genuine
-`Tianjin → Beijing → Tianjin` trip remains unchanged when raw signals support
-Beijing. If raw signals are unavailable or mixed, the stay is retained and marked
-for review. Use `--max-isolated-days 0` to disable automatic correction.
-
-## Development checks
-
-```console
-uv run --with ijson --with reverse-geocode --with timezonefinder \
-  --with pytest --with pytest-cov \
-  pytest --cov=timeline_cities --cov-fail-under=80
-uv run --with ruff ruff check timeline_cities.py tests
-uv run --with ruff ruff format --check timeline_cities.py tests
-uv run --with ty ty check timeline_cities.py
-```
-
-City data comes from [GeoNames](https://www.geonames.org/) and is licensed under
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+[1]: https://nomads.com/@athousandcups
+[2]: https://github.com/mendhak/gpslogger/
+[3]: https://docs.astral.sh/uv/
+[4]: https://support.google.com/maps/answer/6258979?co=GENIE.Platform%3DAndroid&hl=en
+[5]: https://github.com/richardpenman/reverse_geocode/
+[6]: https://www.geonames.org/
+[7]: https://creativecommons.org/licenses/by/4.0/

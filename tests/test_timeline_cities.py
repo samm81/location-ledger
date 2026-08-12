@@ -83,7 +83,7 @@ def test_raw_phone_timestamp_converts_to_coordinate_date(tmp_path: Path) -> None
         input_path,
         max_accuracy_m=1_000,
     )
-    timezone_resolver = TimezoneResolver("auto")
+    timezone_resolver = TimezoneResolver()
 
     assert positions[0].timestamp == datetime(2026, 6, 28, 17, 19, 25, tzinfo=UTC)
     assert timezone_resolver.local_date(positions[0]) == (
@@ -364,13 +364,12 @@ def test_gpx_directory_is_authoritative_and_google_augments(
 
     result = timeline_cities.run(
         [
+            "--google-timeline",
             str(input_path),
             "--gpx-directory",
             str(gpx_directory),
             "--output",
             str(output_prefix),
-            "--timezone",
-            "Europe/Vienna",
         ]
     )
 
@@ -381,6 +380,51 @@ def test_gpx_directory_is_authoritative_and_google_augments(
         )
     )
     assert [row["City"] for row in rows] == ["Vienna", "Budapest"]
+
+
+def test_gpx_directory_can_run_without_google_timeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    gpx_directory = tmp_path / "gpx"
+    gpx_directory.mkdir()
+    (gpx_directory / "20260722.gpx").write_text(
+        """<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
+          <trkpt lat="47.5" lon="19.05">
+            <time>2026-07-22T12:00:00Z</time>
+          </trkpt>
+        </trkseg></trk></gpx>""",
+        encoding="utf-8",
+    )
+    budapest = _match(
+        "Budapest",
+        population=1_741_041,
+        distance_km=2.0,
+        rule="major_city",
+    )
+    monkeypatch.setattr(CityNormalizer, "match", lambda _self, _lat, _lng: budapest)
+
+    result = timeline_cities.run(
+        ["--gpx-directory", str(gpx_directory), "--output", str(tmp_path / "cities")]
+    )
+
+    assert result == 0
+    rows = list(
+        csv.DictReader(
+            (tmp_path / "cities.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    assert [row["City"] for row in rows] == ["Budapest"]
+
+
+def test_run_requires_google_timeline_or_gpx(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = timeline_cities.run([])
+
+    assert result == 1
+    assert "provide --google-timeline" in capsys.readouterr().err
 
 
 def test_semantic_timestamp_uses_explicit_location_offset(tmp_path: Path) -> None:
@@ -407,7 +451,7 @@ def test_semantic_timestamp_uses_explicit_location_offset(tmp_path: Path) -> Non
         input_path,
         max_accuracy_m=50_000,
     )
-    timezone_resolver = TimezoneResolver("auto")
+    timezone_resolver = TimezoneResolver()
 
     assert positions[0].timestamp == datetime(2013, 6, 6, 4, 2, 45, tzinfo=UTC)
     assert positions[0].end_timestamp == datetime(2013, 6, 6, 17, 3, 35, tzinfo=UTC)
@@ -547,29 +591,10 @@ def test_timezone_resolver_uses_coordinate_timezone() -> None:
         accuracy_m=10.0,
     )
 
-    local_day, timezone_name = TimezoneResolver("auto").local_date(position)
+    local_day, timezone_name = TimezoneResolver().local_date(position)
 
     assert local_day == date(2026, 7, 18)
     assert timezone_name == "Europe/Budapest"
-
-
-def test_timezone_resolver_accepts_fixed_timezone() -> None:
-    position = Position(
-        timestamp=datetime(2026, 7, 17, 23, 30, tzinfo=UTC),
-        latitude=40.7,
-        longitude=-74.0,
-        accuracy_m=10.0,
-    )
-
-    local_day, timezone_name = TimezoneResolver("Europe/Budapest").local_date(position)
-
-    assert local_day == date(2026, 7, 18)
-    assert timezone_name == "Europe/Budapest"
-
-
-def test_timezone_resolver_rejects_unknown_timezone() -> None:
-    with pytest.raises(ValueError, match="unknown IANA timezone"):
-        TimezoneResolver("Nowhere/Imaginary")
 
 
 def test_csv_chooses_city_with_most_estimated_time() -> None:
@@ -704,7 +729,7 @@ def test_repair_replaces_only_isolated_one_day_stay(
         )
         for hour in (8, 12, 16)
     ]
-    timezone_resolver = TimezoneResolver("UTC")
+    timezone_resolver = TimezoneResolver()
 
     fixed_stays, audit = timeline_cities.repair_stays(
         raw_stays,
@@ -743,7 +768,7 @@ def test_run_end_to_end(
     output_prefix = tmp_path / "cities.csv"
     raw_path = tmp_path / "cities.raw.csv"
     audit_path = tmp_path / "cities.audit.csv"
-    fixed_path = tmp_path / "cities.fixed.csv"
+    final_path = tmp_path / "cities.csv"
     input_path.write_text(
         json.dumps(
             {
@@ -763,11 +788,10 @@ def test_run_end_to_end(
 
     result = timeline_cities.run(
         [
+            "--google-timeline",
             str(input_path),
             "--output",
             str(output_prefix),
-            "--timezone",
-            "Europe/Budapest",
         ]
     )
 
@@ -777,7 +801,7 @@ def test_run_end_to_end(
     assert row["Departure date"] == "2026-07-17"
     assert row["City"] == "Budapest"
     assert audit_path.exists()
-    assert fixed_path.exists()
+    assert final_path.exists()
 
 
 def test_run_does_not_overwrite_without_confirmation(
@@ -808,11 +832,10 @@ def test_run_does_not_overwrite_without_confirmation(
 
     result = timeline_cities.run(
         [
+            "--google-timeline",
             str(input_path),
             "--output",
             str(tmp_path / "cities"),
-            "--timezone",
-            "Europe/Budapest",
         ]
     )
 
@@ -873,11 +896,10 @@ def test_run_auto_discovers_overrides_from_working_directory(
 
     result = timeline_cities.run(
         [
+            "--google-timeline",
             str(input_path),
             "--output",
             str(output_prefix),
-            "--timezone",
-            "Europe/Budapest",
         ]
     )
 
@@ -887,9 +909,9 @@ def test_run_auto_discovers_overrides_from_working_directory(
             (tmp_path / "cities.raw.csv").read_text(encoding="utf-8").splitlines()
         )
     )
-    fixed_row = next(
+    final_row = next(
         csv.DictReader(
-            (tmp_path / "cities.fixed.csv").read_text(encoding="utf-8").splitlines()
+            (tmp_path / "cities.csv").read_text(encoding="utf-8").splitlines()
         )
     )
     audit_rows = list(
@@ -898,7 +920,7 @@ def test_run_auto_discovers_overrides_from_working_directory(
         )
     )
     assert raw_row["City"] == "Budapest"
-    assert fixed_row["City"] == "Budapest Metro"
+    assert final_row["City"] == "Budapest Metro"
     assert audit_rows[-1]["Action"] == "manual mapping"
 
 
@@ -912,7 +934,7 @@ def test_run_reports_export_without_positions(
         encoding="utf-8",
     )
 
-    result = timeline_cities.run([str(input_path)])
+    result = timeline_cities.run(["--google-timeline", str(input_path)])
 
     assert result == 1
     assert "no usable position signals found" in capsys.readouterr().err
@@ -989,7 +1011,7 @@ def test_explicit_visit_is_split_across_local_midnight() -> None:
 
     parts = timeline_cities._split_interval_by_local_day(
         position,
-        TimezoneResolver("Europe/Budapest"),
+        TimezoneResolver(),
     )
 
     assert parts == [
