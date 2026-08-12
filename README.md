@@ -106,6 +106,7 @@ The script does not load overrides unless `--overrides-dir` is provided. The per
 | `--gpx-directory` | not set | Read [GPSLogger][2] `YYYYMMDD.gpx` tracks and augment them with Google data outside their coverage. |
 | `--overrides-dir` | not set | Read optional `place-mappings.csv` and `trip-overrides.csv` files from this directory. |
 | `--output` | Google Timeline filename or `cities` for GPX-only runs | Set the output filename prefix. |
+| `--overwrite` | not set | Overwrite existing output files without prompting. |
 | `--major-population`, `--major-radius-km` | `500000`, `75` | Prefer a major city within the configured radius. |
 | `--regional-population`, `--regional-radius-km` | `100000`, `40` | Use a smaller populated place when the major-city rule does not fit. |
 | `--cluster-radius-m`, `--cluster-gap-minutes` | `500`, `60` | Group nearby stationary samples to reduce repeated lookups. |

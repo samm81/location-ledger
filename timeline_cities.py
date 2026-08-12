@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import re
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Mapping, Sequence
@@ -1784,10 +1786,14 @@ def output_paths(
 def confirm_overwrite(
     paths: Sequence[Path],
     *,
+    allow_overwrite: bool = False,
     input_file: TextIO | None = None,
     output_file: TextIO | None = None,
 ) -> bool:
     """Ask before replacing any existing output file."""
+    if allow_overwrite:
+        return True
+
     existing_paths = [path for path in paths if path.exists()]
     if not existing_paths:
         return True
@@ -1800,6 +1806,41 @@ def confirm_overwrite(
     print("Overwrite them? [y/N] ", end="", file=output_stream, flush=True)
     answer = input_stream.readline().strip().lower()
     return answer in {"y", "yes"}
+
+
+def write_outputs(
+    raw_stays: Sequence[Stay],
+    audit_records: Sequence[AuditRecord],
+    fixed_stays: Sequence[Stay],
+    paths: tuple[Path, Path, Path],
+) -> None:
+    """Stage all CSVs before atomically replacing their output paths."""
+    raw_path, audit_path, final_path = paths
+    output_directory = raw_path.parent
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix=f".{raw_path.stem}.staging-",
+        dir=output_directory,
+    ) as staging_directory_raw:
+        staging_directory = Path(staging_directory_raw)
+        raw_path_staged = staging_directory / raw_path.name
+        audit_path_staged = staging_directory / audit_path.name
+        final_path_staged = staging_directory / final_path.name
+
+        with raw_path_staged.open("w", encoding="utf-8", newline="") as raw_file:
+            write_stays_csv(raw_stays, raw_file)
+        with audit_path_staged.open("w", encoding="utf-8", newline="") as audit_file:
+            write_audit_csv(audit_records, audit_file)
+        with final_path_staged.open("w", encoding="utf-8", newline="") as final_file:
+            write_stays_csv(fixed_stays, final_file)
+
+        for staged_path, output_path in (
+            (raw_path_staged, raw_path),
+            (audit_path_staged, audit_path),
+            (final_path_staged, final_path),
+        ):
+            os.replace(staged_path, output_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1837,6 +1878,11 @@ def build_parser() -> argparse.ArgumentParser:
             "output filename prefix (default: Google Timeline filename or cities "
             "for GPX-only runs)"
         ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="overwrite existing output files without prompting",
     )
     parser.add_argument("--major-population", type=int, default=500_000)
     parser.add_argument("--major-radius-km", type=float, default=75.0)
@@ -1971,17 +2017,17 @@ def run(arguments: Sequence[str] | None = None) -> int:
         raw_path, audit_path, final_path = output_paths(
             args.google_timeline, args.output
         )
-        if not confirm_overwrite((raw_path, audit_path, final_path)):
+        if not confirm_overwrite(
+            (raw_path, audit_path, final_path),
+            allow_overwrite=args.overwrite,
+        ):
             print(
                 "aborted: existing output files were not overwritten", file=sys.stderr
             )
             return 1
-        with raw_path.open("w", encoding="utf-8", newline="") as raw_file:
-            write_stays_csv(raw_stays, raw_file)
-        with audit_path.open("w", encoding="utf-8", newline="") as audit_file:
-            write_audit_csv(audit_records, audit_file)
-        with final_path.open("w", encoding="utf-8", newline="") as final_file:
-            write_stays_csv(fixed_stays, final_file)
+        write_outputs(
+            raw_stays, audit_records, fixed_stays, (raw_path, audit_path, final_path)
+        )
         print(f"raw: {raw_path}", file=sys.stderr)
         print(f"audit: {audit_path}", file=sys.stderr)
         print(f"final: {final_path}", file=sys.stderr)

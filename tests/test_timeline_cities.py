@@ -845,6 +845,105 @@ def test_run_does_not_overwrite_without_confirmation(
     assert raw_path.read_text(encoding="utf-8") == "keep this file"
 
 
+def test_run_overwrites_without_confirmation_with_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_path = tmp_path / "timeline.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "semanticSegments": [],
+                "rawSignals": [
+                    {
+                        "position": {
+                            "LatLng": "47.5°, 19.05°",
+                            "timestamp": "2026-07-17T15:57:58.174Z",
+                        }
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for output_name in (
+        "cities.raw.csv",
+        "cities.audit.csv",
+        "cities.csv",
+    ):
+        (tmp_path / output_name).write_text("old output", encoding="utf-8")
+    monkeypatch.setattr(timeline_cities.sys, "stdin", io.StringIO())
+
+    result = timeline_cities.run(
+        [
+            "--google-timeline",
+            str(input_path),
+            "--output",
+            str(tmp_path / "cities"),
+            "--overwrite",
+        ]
+    )
+
+    assert result == 0
+    assert (tmp_path / "cities.csv").read_text(encoding="utf-8") != "old output"
+    assert not list(tmp_path.glob(".cities.raw.staging-*"))
+
+
+def test_run_keeps_existing_outputs_when_staging_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_path = tmp_path / "timeline.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "semanticSegments": [],
+                "rawSignals": [
+                    {
+                        "position": {
+                            "LatLng": "47.5°, 19.05°",
+                            "timestamp": "2026-07-17T15:57:58.174Z",
+                        }
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_paths = [
+        tmp_path / "cities.raw.csv",
+        tmp_path / "cities.audit.csv",
+        tmp_path / "cities.csv",
+    ]
+    for output_path in output_paths:
+        output_path.write_text("old output", encoding="utf-8")
+
+    def fail_audit_write(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("test staging failure")
+
+    monkeypatch.setattr(timeline_cities, "write_audit_csv", fail_audit_write)
+
+    result = timeline_cities.run(
+        [
+            "--google-timeline",
+            str(input_path),
+            "--output",
+            str(tmp_path / "cities"),
+            "--overwrite",
+        ]
+    )
+
+    assert result == 1
+    assert [path.read_text(encoding="utf-8") for path in output_paths] == [
+        "old output",
+        "old output",
+        "old output",
+    ]
+    assert not list(tmp_path.glob(".cities.raw.staging-*"))
+
+
 def test_confirm_overwrite_accepts_yes_and_defaults_to_no(tmp_path: Path) -> None:
     existing_path = tmp_path / "existing.csv"
     existing_path.write_text("existing", encoding="utf-8")
@@ -862,6 +961,12 @@ def test_confirm_overwrite_accepts_yes_and_defaults_to_no(tmp_path: Path) -> Non
         [existing_path],
         input_file=io.StringIO("yes\n"),
         output_file=yes_output,
+    )
+    assert timeline_cities.confirm_overwrite(
+        [existing_path],
+        allow_overwrite=True,
+        input_file=io.StringIO(),
+        output_file=io.StringIO(),
     )
 
 
