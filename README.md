@@ -14,6 +14,10 @@ When both sources cover the same period, [GPSLogger][2] data wins. Google Maps T
 
 The workflow is tailored to this data and this output format. It is not a general-purpose location-history application.
 
+## ai assistance
+
+completely vibecoded. verify generated timelines before relying on them.
+
 ## Requirements
 
 - Python 3.11 or newer.
