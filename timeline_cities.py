@@ -46,23 +46,23 @@ GPX_FILENAME_PATTERN = re.compile(r"^\d{8}\.gpx$", re.IGNORECASE)
 PLACE_MAPPINGS_FILENAME = "place-mappings.csv"
 TRIP_OVERRIDES_FILENAME = "trip-overrides.csv"
 PLACE_MAPPING_FIELDS = (
-    "From city",
-    "From country",
-    "To city",
-    "To country",
+    "from city",
+    "from country",
+    "to city",
+    "to country",
 )
 TRIP_OVERRIDE_FIELDS = (
-    "Arrival date",
-    "Departure date",
-    "City",
-    "Country",
+    "arrival date",
+    "departure date",
+    "city",
+    "country",
 )
 TRIP_OUTPUT_FIELDS = (
-    "Arrival date",
-    "Departure date",
-    "Duration in days",
-    "City",
-    "Country",
+    "arrival date",
+    "departure date",
+    "duration in days",
+    "city",
+    "country",
 )
 
 
@@ -1233,8 +1233,8 @@ def load_place_mappings(path: Path) -> PlaceMappingTable:
     """Load exact city-country mappings and resolve mapping chains."""
     mappings: PlaceMappingTable = {}
     for line_number, row in _read_override_rows(path, PLACE_MAPPING_FIELDS):
-        source = (row["From city"], row["From country"])
-        target = (row["To city"], row["To country"])
+        source = (row["from city"], row["from country"])
+        target = (row["to city"], row["to country"])
         if source in mappings:
             msg = f"{path}: row {line_number} duplicates mapping source {source!r}"
             raise ValueError(msg)
@@ -1262,31 +1262,31 @@ def load_trip_overrides(path: Path) -> list[TripOverride]:
     overrides: list[TripOverride] = []
     for line_number, row in _read_trip_override_rows(path):
         arrival_date = _parse_override_date(
-            row["Arrival date"],
+            row["arrival date"],
             path=path,
             line_number=line_number,
-            field_name="Arrival date",
+            field_name="arrival date",
         )
         departure_date = _parse_override_date(
-            row["Departure date"],
+            row["departure date"],
             path=path,
             line_number=line_number,
-            field_name="Departure date",
+            field_name="departure date",
         )
         if departure_date < arrival_date:
             msg = f"{path}: row {line_number} departs before it arrives"
             raise ValueError(msg)
-        if bool(row["City"]) != bool(row["Country"]):
+        if bool(row["city"]) != bool(row["country"]):
             msg = (
-                f"{path}: row {line_number} must blank both City and Country to delete"
+                f"{path}: row {line_number} must blank both city and country to delete"
             )
             raise ValueError(msg)
         overrides.append(
             TripOverride(
                 arrival_date=arrival_date,
                 departure_date=departure_date,
-                city=row["City"],
-                country=row["Country"],
+                city=row["city"],
+                country=row["country"],
             )
         )
 
@@ -1339,12 +1339,12 @@ def _read_trip_override_rows(path: Path) -> Iterator[tuple[int, dict[str, str]]]
                 field_name: value.strip()
                 for field_name, value in zip(TRIP_OVERRIDE_FIELDS, values)
             }
-            for field_name in ("Arrival date", "Departure date"):
+            for field_name in ("arrival date", "departure date"):
                 if not row[field_name]:
                     msg = f"{path}: row {line_number} has an empty {field_name}"
                     raise ValueError(msg)
-            if bool(row["City"]) != bool(row["Country"]):
-                msg = f"{path}: row {line_number} must blank both City and Country to delete"
+            if bool(row["city"]) != bool(row["country"]):
+                msg = f"{path}: row {line_number} must blank both city and country to delete"
                 raise ValueError(msg)
             yield line_number, row
 
@@ -1682,11 +1682,11 @@ def repair_stays(
 def write_stays_csv(stays: Sequence[Stay], output_file: TextIO) -> None:
     """Write stays using the requested five-column CSV format."""
     fieldnames = [
-        "Arrival date",
-        "Departure date",
-        "Duration in days",
-        "City",
-        "Country",
+        "arrival date",
+        "departure date",
+        "duration in days",
+        "city",
+        "country",
     ]
     writer = csv.DictWriter(
         output_file,
@@ -1698,11 +1698,11 @@ def write_stays_csv(stays: Sequence[Stay], output_file: TextIO) -> None:
     for stay in stays:
         writer.writerow(
             {
-                "Arrival date": stay.arrival_date.isoformat(),
-                "Departure date": stay.departure_date.isoformat(),
-                "Duration in days": stay.duration_days,
-                "City": stay.city,
-                "Country": stay.country,
+                "arrival date": stay.arrival_date.isoformat(),
+                "departure date": stay.departure_date.isoformat(),
+                "duration in days": stay.duration_days,
+                "city": stay.city,
+                "country": stay.country,
             }
         )
 
@@ -1718,21 +1718,21 @@ def write_csv(
 def write_audit_csv(records: Sequence[AuditRecord], output_file: TextIO) -> None:
     """Write the correction audit alongside the raw stays."""
     fieldnames = [
-        "Arrival date",
-        "Departure date",
-        "Duration in days",
-        "City",
-        "Country",
-        "Action",
-        "Fixed city",
-        "Fixed country",
-        "Confidence",
-        "Reason",
-        "Raw points",
-        "Raw candidate points",
-        "Raw dominant city",
-        "Raw dominant country",
-        "Raw dominant ratio",
+        "arrival date",
+        "departure date",
+        "duration in days",
+        "city",
+        "country",
+        "action",
+        "fixed city",
+        "fixed country",
+        "confidence",
+        "reason",
+        "raw points",
+        "raw candidate points",
+        "raw dominant city",
+        "raw dominant country",
+        "raw dominant ratio",
     ]
     writer = csv.DictWriter(
         output_file,
@@ -1745,21 +1745,21 @@ def write_audit_csv(records: Sequence[AuditRecord], output_file: TextIO) -> None
         stay = record.raw_stay
         writer.writerow(
             {
-                "Arrival date": stay.arrival_date.isoformat(),
-                "Departure date": stay.departure_date.isoformat(),
-                "Duration in days": stay.duration_days,
-                "City": stay.city,
-                "Country": stay.country,
-                "Action": record.action,
-                "Fixed city": record.fixed_city,
-                "Fixed country": record.fixed_country,
-                "Confidence": record.confidence,
-                "Reason": record.reason,
-                "Raw points": record.raw_support.total_points,
-                "Raw candidate points": record.raw_support.candidate_points,
-                "Raw dominant city": record.raw_support.dominant_city,
-                "Raw dominant country": record.raw_support.dominant_country,
-                "Raw dominant ratio": f"{record.raw_support.dominant_ratio:.2f}",
+                "arrival date": stay.arrival_date.isoformat(),
+                "departure date": stay.departure_date.isoformat(),
+                "duration in days": stay.duration_days,
+                "city": stay.city,
+                "country": stay.country,
+                "action": record.action,
+                "fixed city": record.fixed_city,
+                "fixed country": record.fixed_country,
+                "confidence": record.confidence,
+                "reason": record.reason,
+                "raw points": record.raw_support.total_points,
+                "raw candidate points": record.raw_support.candidate_points,
+                "raw dominant city": record.raw_support.dominant_city,
+                "raw dominant country": record.raw_support.dominant_country,
+                "raw dominant ratio": f"{record.raw_support.dominant_ratio:.2f}",
             }
         )
 

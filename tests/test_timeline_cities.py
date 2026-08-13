@@ -96,13 +96,13 @@ def test_loads_manual_overrides_from_explicit_directory(tmp_path: Path) -> None:
     override_directory = tmp_path / "overrides"
     override_directory.mkdir(parents=True)
     (override_directory / "place-mappings.csv").write_text(
-        "\ufeffFrom city,From country,To city,To country\n"
+        "\ufefffrom city,from country,to city,to country\n"
         "Midtown,United States,Manhattan,United States\n"
         "Manhattan,United States,New York City,United States\n",
         encoding="utf-8",
     )
     (override_directory / "trip-overrides.csv").write_text(
-        "Arrival date,Departure date,City,Country\n"
+        "arrival date,departure date,city,country\n"
         "2026-04-30,2026-05-22,Tianjin,China\n",
         encoding="utf-8",
     )
@@ -127,7 +127,7 @@ def test_does_not_load_manual_overrides_without_directory(tmp_path: Path) -> Non
     override_directory = tmp_path / "inputs" / "overrides"
     override_directory.mkdir(parents=True)
     (override_directory / "place-mappings.csv").write_text(
-        "From city,From country,To city,To country\n"
+        "from city,from country,to city,to country\n"
         "Budapest,Hungary,Budapest Metro,Hungary\n",
         encoding="utf-8",
     )
@@ -138,7 +138,7 @@ def test_does_not_load_manual_overrides_without_directory(tmp_path: Path) -> Non
 def test_loads_blank_city_delete_override(tmp_path: Path) -> None:
     path = tmp_path / "trip-overrides.csv"
     path.write_text(
-        "Arrival date,Departure date,City,Country\n2026-05-15,2026-05-15,,\n",
+        "arrival date,departure date,city,country\n2026-05-15,2026-05-15,,\n",
         encoding="utf-8",
     )
 
@@ -150,7 +150,7 @@ def test_loads_blank_city_delete_override(tmp_path: Path) -> None:
 def test_loads_copied_output_row_with_duration_column(tmp_path: Path) -> None:
     path = tmp_path / "trip-overrides.csv"
     path.write_text(
-        "Arrival date,Departure date,City,Country\n"
+        "arrival date,departure date,city,country\n"
         "2025-08-12,2025-09-09,28,Ubud,Indonesia\n",
         encoding="utf-8",
     )
@@ -167,7 +167,7 @@ def test_loads_copied_output_row_with_duration_column(tmp_path: Path) -> None:
 def test_rejects_cross_country_place_mapping(tmp_path: Path) -> None:
     path = tmp_path / "place-mappings.csv"
     path.write_text(
-        "From city,From country,To city,To country\n"
+        "from city,from country,to city,to country\n"
         "Manhattan,United States,Beijing,China\n",
         encoding="utf-8",
     )
@@ -179,7 +179,7 @@ def test_rejects_cross_country_place_mapping(tmp_path: Path) -> None:
 def test_rejects_place_mapping_cycle(tmp_path: Path) -> None:
     path = tmp_path / "place-mappings.csv"
     path.write_text(
-        "From city,From country,To city,To country\nA,H,B,H\nB,H,A,H\n",
+        "from city,from country,to city,to country\nA,H,B,H\nB,H,A,H\n",
         encoding="utf-8",
     )
 
@@ -190,7 +190,7 @@ def test_rejects_place_mapping_cycle(tmp_path: Path) -> None:
 def test_rejects_overlapping_trip_override_ranges(tmp_path: Path) -> None:
     path = tmp_path / "trip-overrides.csv"
     path.write_text(
-        "Arrival date,Departure date,City,Country\n"
+        "arrival date,departure date,city,country\n"
         "2026-01-01,2026-01-10,A,H\n"
         "2026-01-09,2026-01-12,B,H\n",
         encoding="utf-8",
@@ -205,7 +205,7 @@ def test_shared_transition_dates_are_allowed_for_trip_overrides(
 ) -> None:
     path = tmp_path / "trip-overrides.csv"
     path.write_text(
-        "Arrival date,Departure date,City,Country\n"
+        "arrival date,departure date,city,country\n"
         "2026-01-01,2026-01-10,A,H\n"
         "2026-01-10,2026-01-12,B,H\n",
         encoding="utf-8",
@@ -391,7 +391,7 @@ def test_gpx_directory_is_authoritative_and_google_augments(
             (tmp_path / "cities.raw.csv").read_text(encoding="utf-8").splitlines()
         )
     )
-    assert [row["City"] for row in rows] == ["Vienna", "Budapest"]
+    assert [row["city"] for row in rows] == ["Vienna", "Budapest"]
 
 
 def test_gpx_directory_can_run_without_google_timeline(
@@ -427,7 +427,7 @@ def test_gpx_directory_can_run_without_google_timeline(
             (tmp_path / "cities.csv").read_text(encoding="utf-8").splitlines()
         )
     )
-    assert [row["City"] for row in rows] == ["Budapest"]
+    assert [row["city"] for row in rows] == ["Budapest"]
 
 
 def test_run_requires_google_timeline_or_gpx(
@@ -635,14 +635,14 @@ def test_csv_chooses_city_with_most_estimated_time() -> None:
 
     row = next(csv.DictReader(io.StringIO(output.getvalue())))
     assert row == {
-        "Arrival date": "2026-07-17",
-        "Departure date": "2026-07-17",
-        "Duration in days": "0",
-        "City": "Budapest",
-        "Country": "Hungary",
+        "arrival date": "2026-07-17",
+        "departure date": "2026-07-17",
+        "duration in days": "0",
+        "city": "Budapest",
+        "country": "Hungary",
     }
     assert output.getvalue().startswith(
-        '"Arrival date","Departure date","Duration in days","City","Country"'
+        '"arrival date","departure date","duration in days","city","country"'
     )
 
 
@@ -799,9 +799,9 @@ def test_run_end_to_end(
 
     assert result == 0
     row = next(csv.DictReader(io.StringIO(raw_path.read_text(encoding="utf-8"))))
-    assert row["Arrival date"] == "2026-07-17"
-    assert row["Departure date"] == "2026-07-17"
-    assert row["City"] == "Budapest"
+    assert row["arrival date"] == "2026-07-17"
+    assert row["departure date"] == "2026-07-17"
+    assert row["city"] == "Budapest"
     assert audit_path.exists()
     assert final_path.exists()
 
@@ -995,7 +995,7 @@ def test_run_loads_overrides_from_explicit_directory(
     override_directory = tmp_path / "overrides"
     override_directory.mkdir(parents=True)
     (override_directory / "place-mappings.csv").write_text(
-        "From city,From country,To city,To country\n"
+        "from city,from country,to city,to country\n"
         "Budapest,Hungary,Budapest Metro,Hungary\n",
         encoding="utf-8",
     )
@@ -1028,9 +1028,9 @@ def test_run_loads_overrides_from_explicit_directory(
             (tmp_path / "cities.audit.csv").read_text(encoding="utf-8").splitlines()
         )
     )
-    assert raw_row["City"] == "Budapest"
-    assert final_row["City"] == "Budapest Metro"
-    assert audit_rows[-1]["Action"] == "manual mapping"
+    assert raw_row["city"] == "Budapest"
+    assert final_row["city"] == "Budapest Metro"
+    assert audit_rows[-1]["action"] == "manual mapping"
 
 
 def test_run_reports_export_without_positions(

@@ -71,12 +71,12 @@ for `--output cities`, the script creates:
 - `cities.audit.csv`: raw stays, automatic corrections, and manual changes.
 - `cities.csv`: the final corrected result.
 
-arrival and departure dates describe the stay's endpoints. if a move occurs on a shared transition date, that date appears in both adjacent rows intentionally, so the travel day is counted twice in the timeline. `Duration in days` remains the difference between the arrival and departure dates.
+arrival and departure dates describe the stay's endpoints. if a move occurs on a shared transition date, that date appears in both adjacent rows intentionally, so the travel day is counted twice in the timeline. `duration in days` remains the difference between the arrival and departure dates.
 
 example:
 
 ```csv
-"Arrival date","Departure date","Duration in days","City","Country"
+"arrival date","departure date","duration in days","city","country"
 "2026-07-15","2026-07-20","5","Budapest","Hungary"
 "2026-07-20","2026-07-25","5","Vienna","Austria"
 ```
@@ -100,7 +100,7 @@ uv run timeline_cities.py \
   --output cities
 ```
 
-the script does not load overrides unless `--overrides-dir` is provided. the personal files in `inputs/overrides/` are ignored by git. to delete one zero-day stay without deleting neighboring stays, leave `City` and `Country` blank for that exact date.
+the script does not load overrides unless `--overrides-dir` is provided. the personal files in `inputs/overrides/` are ignored by git. to delete one zero-day stay without deleting neighboring stays, leave `city` and `country` blank for that exact date.
 
 ## options
 
