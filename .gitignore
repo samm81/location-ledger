@@ -2,5 +2,8 @@
 .pytest_cache/
 .ruff_cache/
 __pycache__/
+_build/
+mni.ac/
+MAKE_SKILL.md
 inputs/overrides/place-mappings.csv
 inputs/overrides/trip-overrides.csv

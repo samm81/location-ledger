@@ -26,6 +26,36 @@ completely vibecoded. verify generated timelines before relying on them.
 
 the script header declares its python dependencies in a format that [uv][3] can auto-install when you run the script with `uv run`.
 
+## build and deploy
+
+the repository can build a small deployment bundle. the bundle contains the script, its lockfile, the project README, and a standalone `uv` executable.
+
+the target server does not need a system-wide `uv` installation. uv can download the required python version and packages on the first run, so the server needs network access.
+
+the bundle build downloads the pinned `uv` release for `x86_64-unknown-linux-gnu` and verifies its checksum. it does not copy `uv` from the build machine.
+
+the downloaded archive and binary stay in `_build/`. make fetches them again only after `make clean`, or when `UV_VERSION` or `UV_TARGET` changes.
+
+make copies only bundle files whose source changed. run `make clean` after removing a file from the bundle definition.
+
+build the bundle:
+
+```console
+make build
+```
+
+set `UV_TARGET` when the server uses another supported linux target. set `UV_VERSION` when you update the pinned uv release.
+
+deploy it to the application directory on the target server:
+
+```console
+DEPLOY_PATH='hostname.tld:~/opt/apps/timeline-cities' make deploy/prod
+```
+
+the deployment does not include the refresh wrapper, input data, or output data. the server's `timeline-cities` systemd package supplies the wrapper and configures the data paths.
+
+use `make check` before deployment. use `make lock` when the inline dependencies change.
+
 ## quickstart
 
 1. export google maps timeline data on android if you want to use it. open **settings > location > location services > timeline > export timeline data**, then choose where to save the file. see [google's android export instructions][4].
